@@ -38,4 +38,15 @@ Thumbs.db
 
 # 日志/备份
 *.log
-*.bak
+*.bak.vs/
+*.ipch
+*.db
+*.dll
+*.exe
+*.lib
+*.pdb
+Debug/
+Release/
+x64/
+x86/
+*.pro.user
