@@ -1,0 +1,41 @@
+# Visual Studio 缓存/临时文件
+.vs/
+*.suo
+*.user
+*.ipch
+*.pch
+*.aps
+*.ncb
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+
+# Qt Creator 临时文件
+*.pro.user
+CMakeLists.txt.user
+*.autosave
+
+# 编译输出目录
+Debug/
+Release/
+x64/
+x86/
+build/
+*.obj
+*.exe
+*.dll
+*.lib
+*.pdb
+
+# OpenCV 等第三方库（建议用 vcpkg 或手动下载）
+OpenCV/*.dll
+OpenCV/*.exe
+
+# 系统文件
+Thumbs.db
+.DS_Store
+
+# 日志/备份
+*.log
+*.bak
