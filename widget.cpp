@@ -806,53 +806,65 @@ void Widget::slot_displayAndDetect(cv::Mat *image)
         return;
     }
 
-    // 3. 核心重绘机制：只要在检测有效期内（比如最近 2000 毫秒），每次来新原图，都把框重新印上去！
+    // 3. 核心重绘机制：只要在检测有效期内（2000毫秒），把识别结果强行画在图像上！
     qint64 now = QDateTime::currentMSecsSinceEpoch();
     if (now - g_lastDetectTime < 2000 && !g_lastDrawResults.empty()) {
+
+        // 动态计算自适应比例 (把字号调回 0.4，之前 0.2 太小了)
+        double dynamicScale = std::max(1.0, displayImg.rows / 800.0);
+        double fontScale = 0.4 * dynamicScale;
+
+        // 框和字的粗细
+        int boxThickness = std::max(2, static_cast<int>(2 * dynamicScale));
+        int textThickness = std::max(1, static_cast<int>(1.5 * dynamicScale));
+
         for (const auto& res : g_lastDrawResults) {
             cv::Rect rect = res.rect;
             rect.x += g_lastRoi.x; // 绝对坐标映射还原
             rect.y += g_lastRoi.y;
 
-            cv::rectangle(displayImg, rect, cv::Scalar(0, 255, 0), 2);
+            // 画绿框
+            cv::rectangle(displayImg, rect, cv::Scalar(0, 255, 0), boxThickness);
 
-            std::string scoreText = std::to_string(static_cast<int>(res.score * 100));
-            int baseline = 0;
-            double fontScale = 0.8;
-            cv::Size textSize = cv::getTextSize(scoreText, cv::FONT_HERSHEY_SIMPLEX, fontScale, 2, &baseline);
+            // 分数大于等于0才显示数字
+            if (res.score >= 0) {
+                std::string scoreText = std::to_string(static_cast<int>(res.score * 100));
+                int baseline = 0;
+                cv::Size textSize = cv::getTextSize(scoreText, cv::FONT_HERSHEY_SIMPLEX, fontScale, textThickness, &baseline);
 
-            cv::Point boxCenter(rect.x + rect.width / 2, rect.y);
-            int textX = boxCenter.x - textSize.width / 2;
-            int textY = boxCenter.y - baseline - 2;
+                // 文本位置：框的正上方中心对齐
+                cv::Point boxCenter(rect.x + rect.width / 2, rect.y);
+                int textX = boxCenter.x - textSize.width / 2;
+                int textY = boxCenter.y - 5; // 紧贴绿框上方
 
-            // 边界保护，防止文字框画到图片外面
-            textX = std::max(0, std::min(textX, displayImg.cols - textSize.width));
-            textY = std::max(textSize.height, std::min(textY, displayImg.rows));
+                // 边界保护：防止字画出图片外面导致崩溃
+                textX = std::max(0, std::min(textX, displayImg.cols - textSize.width));
+                textY = std::max(textSize.height, std::min(textY, displayImg.rows));
 
-            cv::rectangle(displayImg,
-                cv::Point(textX - 2, textY - textSize.height),
-                cv::Point(textX + textSize.width + 2, textY + 0.5),
-                cv::Scalar(255, 255, 255), cv::FILLED);
+                // 🔥🔥🔥 核心魔法：文字描边（Outline），完美替代笨重的白色实心背景板
+                // 第一层：用纯黑加粗画底色（充当黑边轮廓，防止背景也是亮的导致看不清）
+                cv::putText(displayImg, scoreText, cv::Point(textX, textY),
+                    cv::FONT_HERSHEY_SIMPLEX, fontScale, cv::Scalar(0, 0, 0), textThickness + 2);
 
-            cv::putText(displayImg, scoreText, cv::Point(textX, textY),
-                cv::FONT_HERSHEY_SIMPLEX, fontScale, cv::Scalar(255, 0, 0), 2);
+                // 第二层：用亮黄色（或者纯红色）画表层字体，极度清晰！
+                // cv::Scalar(0, 255, 255) 是亮黄色，cv::Scalar(0, 0, 255) 是纯红色
+                cv::putText(displayImg, scoreText, cv::Point(textX, textY),
+                    cv::FONT_HERSHEY_SIMPLEX, fontScale, cv::Scalar(0, 255, 255), textThickness);
+            }
         }
     }
 
-    // 4. OpenCV Mat 转 Qt QImage
+    // 4. OpenCV Mat 转 Qt QImage 显示
     QImage img((const uchar *)displayImg.data, displayImg.cols, displayImg.rows, displayImg.step, QImage::Format_RGB888);
     img = img.rgbSwapped();
-
-    // 5. 强制拉伸图像铺满Label
     QSize labelSize = ui->image_undetected->size();
     QPixmap pixmap = QPixmap::fromImage(img);
-    QPixmap scaledPixmap = pixmap.scaled(labelSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    // 正确的等比例显示模式（与底层鼠标计算逻辑完全咬合）
+    QPixmap scaledPixmap = pixmap.scaled(labelSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
 
-    // 6. 在Label上显示
     ui->image_undetected->setPixmap(scaledPixmap);
     ui->image_undetected->setAlignment(Qt::AlignCenter);
 }
-
 /**
  * @brief OCR识别检测槽函数
  * @param image 输入图像指针
@@ -860,477 +872,90 @@ void Widget::slot_displayAndDetect(cv::Mat *image)
  * @details 使用PaddleOCR进行文字识别，支持中英文、数字识别
  */
 
-//ui缩放版
-//void Widget::slot_readAndDetect(cv::Mat *image, Rect2d diffbox)
-//{
-//    // 检查延迟剔除队列
-//    if (!removalQueue.empty() && totalImages >= removalQueue.front().second - 1)
-//    {
-//        qDebug() << "wrongindex" << wrongindex;
-//        wrongremove();
-//        removalQueue.pop();
-//    }
-
-//    currentImagesSnapshot = totalImages; // 每次循环中记录当前 totalImages 的快照
-//    auto start = std::chrono::high_resolution_clock::now();
-//    if (!image || image->empty())
-//    {
-//        qDebug() << "Error: Invalid input image.";
-//        return;
-//    }
-//    cv::Mat croppedImage;
-//    // vector<QRect> detectedRects;
-//    QRect detRect(0, 0, 0, 0);
-//    QRect detRect1(0, 0, 0, 0);
-//    // 1红色2绿色3蓝色
-//    imageLabel->setColor(color);
-//    // imageLabel->clearGreenRects();
-//    if (judge)
-//    {
-//        j = 1;
-//        x++;
-//        judge = false;
-//    }
-//    if ((j - 1) % x == 0)
-//    {
-//        imageLabel->clearGreenRects();
-//        detectedRects.clear();
-//        string1.clear();
-//    }
-//    if (!first)
-//    {
-//        double scaleX = static_cast<double>(ui->image_undetected->width()) / image->cols;
-//        double scaleY = static_cast<double>(ui->image_undetected->height()) / image->rows;
-//        int offsetX = (ui->image_undetected->width() - scaleX * image->cols) / 2;
-//        int offsetY = (ui->image_undetected->height() - scaleY * image->rows) / 2;
-//        QRect selectionRect1(
-//            static_cast<int>(diffbox.x * scaleX + offsetX),
-//            static_cast<int>(diffbox.y * scaleY + offsetY),
-//            static_cast<int>(diffbox.width * scaleX),
-//            static_cast<int>(diffbox.height * scaleY));
-//        selectionRect = selectionRect1;
-//    }
-//    else
-//    {
-//        QRect selectionRect1(
-//            static_cast<int>(diffbox.x),
-//            static_cast<int>(diffbox.y),
-//            static_cast<int>(diffbox.width),
-//            static_cast<int>(diffbox.height));
-//        selectionRect = selectionRect1;
-//    }
-//    // 确保有有效的选择区域
-//    if (selectionRect.isNull())
-//    {
-//        //        QMessageBox::warning(this, "警告", "没有选择区域！");
-//        return;
-//    }
-//    xRatio = static_cast<double>(image->cols) / imageLabel->width();
-//    yRatio = static_cast<double>(image->rows) / imageLabel->height();
-//    roi = cv::Rect(
-//        static_cast<int>(selectionRect.left() * xRatio),
-//        static_cast<int>(selectionRect.top() * yRatio),
-//        static_cast<int>(selectionRect.width() * xRatio),
-//        static_cast<int>(selectionRect.height() * yRatio)
-
-//    );
-//    roi &= cv::Rect(0, 0, image->cols, image->rows);
-//    if (roi.width <= 0 || roi.height <= 0)
-//    {
-//        QMessageBox::warning(this, "警告", "选择区域无效！");
-//        return;
-//    }
-//    else
-//    {
-//        // 提取 ROI
-//        croppedImage = (*image)(roi);
-//    }
-//    if (croppedImage.type() != CV_8UC3)
-//    {
-//        cv::Mat temp;
-//        cv::cvtColor(croppedImage, temp, cv::COLOR_GRAY2BGR);
-//        croppedImage = temp;
-//    }
-//    QString target_qstring = setdatetime();
-//    std::string target_string = target_qstring.toStdString();
-//    ui->imagenum->setText(QString::number(totalImages));
-//    std::vector<std::vector<std::vector<int>>> boxes;
-//    det->Run(croppedImage, boxes);
-//    cv::imshow("croppedimage", croppedImage);
-//    vector<std::pair<std::string, cv::Rect>> str_res = rec->RunOCR(boxes, croppedImage, cls);
-//    string str;
-//    std::sort(str_res.begin(), str_res.end(), [](const auto &a, const auto &b)
-//              {
-//                  return a.second.y < b.second.y; // 按 Y 坐标升序排序（顶部元素在前）
-//              });
-
-//    // 清空之前的结果
-//    allResults.clear();
-//    detectedRects.clear();
-
-//    qDebug()<<"11111";
-//    // 现在按排序后的顺序处理结果
-//    for (size_t i = 0; i < str_res.size(); i++)
-//    {
-//        auto &res = str_res[i];
-//        // 1. 输出【原始OCR识别结果】（清理前）
-//            qDebug() << "number" << i+1 << "text：" << QString::fromStdString(res.first);
-
-
-//        // 清理文本：移除非字母数字和中文字符
-//        res.first.erase(std::remove_if(res.first.begin(), res.first.end(), [this](char c)
-//                                       { return !isAlnumOrChinese(c); }),
-//                        res.first.end());
-
-//        // 添加处理后的文本（只有一行时不加换行符）
-//        if (i < str_res.size() - 1)
-//        {
-//            allResults += res.first + '\n'; // 不是最后一行，添加换行符
-//        }
-//        else
-//        {
-//            allResults += res.first; // 最后一行，不加换行符
-//        }
-//        qDebug() <<"allresults"<< QString::fromStdString(allResults.c_str());
-
-//        // 处理检测区域
-//        detRect1.setX(res.second.x);
-//        detRect1.setY(res.second.y);
-//        detRect1.setWidth(res.second.width);
-//        detRect1.setHeight(res.second.height);
-
-//        // 转换为原始图像坐标
-//        detRect.setX((detRect1.topLeft().x() + roi.x) / xRatio);
-//        detRect.setY((detRect1.topLeft().y() + roi.y) / yRatio);
-//        detRect.setWidth(detRect1.width() / xRatio);
-//        detRect.setHeight(detRect1.height() / yRatio);
-//        detectedRects.push_back(detRect);
-//    }
-
-//    qDebug()<<"2222";
-//    qDebug() << "allresults" << QString::fromStdString(allResults);
-
-//    // 显示 OCR 结果
-//    ui->resultlabel_2->setText(QString::fromStdString(allResults));
-//    ui->resultlabel_2->setWordWrap(true);
-
-//    // 增大字体
-//    QFont font = ui->resultlabel_2->font();
-//    font.setPointSize(16);
-//    ui->resultlabel_2->setFont(font);
-
-//    // 添加检测框
-//    for (const auto &rect : detectedRects)
-//    {
-//        imageLabel->addSelectionRect(rect, 2);
-//    }
-//    imageLabel->update();
-
-//    // 判断识别结果
-//    if (j % x == 0)
-//    {
-//        if (allResults.empty())
-//        {
-//            // 识别失败：保存NG图像
-//            if ((ui->comboBox->currentIndex() == 1) || (ui->comboBox->currentIndex() == 3))
-//            {
-//                QString saveDir = selectedDir + "/ng/";
-//                saveImage2("jpg", saveDir);
-//            }
-
-//            ngImages++;
-//            totalImages++;
-//            ui->resultlabel->setText(QString("<font size='10' color='red'>错误！</font>"));
-
-//            // 剔除逻辑
-//            if (wrongindex == 0)
-//            {
-//                qDebug() << "wrongindex=0, calling wrongremove immediately";
-//                wrongremove();
-//            }
-//            else
-//            {
-//                qDebug() << "wrongindex=" << wrongindex << ", adding to queue for delayed removal";
-//                removalQueue.push(std::make_pair(totalImages, totalImages + wrongindex));
-//            }
-//        }
-//        else
-//        {
-//            if (allResults == target_string)
-//            {
-//                // 识别成功：保存OK图像
-//                totalImages++;
-//                if ((ui->comboBox->currentIndex() == 2) || (ui->comboBox->currentIndex() == 3))
-//                {
-//                    QString saveDir = selectedDir + "/ok/";
-//                    saveImage2("jpg", saveDir);
-//                }
-//                ui->resultlabel->setText(QString("<font size='10' color='SpringGreen'>正确！</font><br>"));
-//                rightremove();
-//            }
-//            else
-//            {
-//                // 识别内容不匹配：保存NG图像
-//                if ((ui->comboBox->currentIndex() == 1) || (ui->comboBox->currentIndex() == 3))
-//                {
-//                    QString saveDir = selectedDir + "/ng/";
-//                    saveImage2("jpg", saveDir);
-//                }
-
-//                ngImages++;
-//                totalImages++;
-//                ui->resultlabel->setText(QString("<font size='10' color='red'>错误！</font>"));
-
-//                if (wrongindex == 0)
-//                {
-//                    qDebug() << "wrongindex=0, calling wrongremove immediately";
-//                    wrongremove();
-//                }
-//                else
-//                {
-//                    qDebug() << "wrongindex=" << wrongindex << ", adding to queue for delayed removal";
-//                    removalQueue.push(std::make_pair(totalImages, totalImages + wrongindex));
-//                }
-//            }
-//        }
-//    }
-
-//    // 更新统计信息
-//    double hegerate = (1 - static_cast<double>(ngImages) / totalImages) * 100;
-//    QString str1 = QString::number(hegerate, 'f', 1);
-//    ui->lineBoxIndex_6->setText(str1);
-//    ui->ngnum->setText(QString("%1").arg(ngImages));
-//    ui->imagenum->setText(QString("%1").arg(totalImages));
-
-//    // 显示检测耗时
-//    auto end = std::chrono::high_resolution_clock::now();
-//    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-//    ui->speedLabel->setText(QString("检测耗时 %1 毫秒").arg(duration));
-
-//    j++;
-//}
-
 //原始图像版
 void Widget::slot_readAndDetect(cv::Mat *image, Rect2d diffbox)
 {
-    // 检查延迟剔除队列
-    if (!removalQueue.empty() && totalImages >= removalQueue.front().second - 1)
-    {
-        qDebug() << "wrongindex" << wrongindex;
-        wrongremove();
-        removalQueue.pop();
+    if (!removalQueue.empty() && totalImages >= removalQueue.front().second - 1) {
+        wrongremove(); removalQueue.pop();
     }
-
-    currentImagesSnapshot = totalImages; // 每次循环中记录当前 totalImages 的快照
+    currentImagesSnapshot = totalImages;
     auto start = std::chrono::high_resolution_clock::now();
-    if (!image || image->empty())
-    {
-        qDebug() << "Error: Invalid input image.";
-        return;
-    }
-    cv::Mat croppedImage;
-    QRect detRect(0, 0, 0, 0);  // 用于存储转换后的原始图像坐标检测框
-    cv::Rect detRect1(0, 0, 0, 0); // 改为cv::Rect，直接对应原始图像坐标
+    if (!image || image->empty()) return;
 
-    // 1红色2绿色3蓝色
-    imageLabel->setColor(color);
+    if (judge) { j = 1; x++; judge = false; }
 
-    if (judge)
-    {
-        j = 1;
-        x++;
-        judge = false;
-    }
-    if ((j - 1) % x == 0)
-    {
-        imageLabel->clearGreenRects();
-        detectedRects.clear();
-        string1.clear();
-    }
-
-    // ===================== 核心修改：完全基于原始图像坐标 =====================
-    // 1. 直接使用传入的diffbox作为原始图像上的选择区域（diffbox需是原始图像坐标）
-    // 转换Rect2d为cv::Rect（取整，因像素坐标为整数）
-    cv::Rect rawSelectionRect(
-                static_cast<int>(diffbox.x),
-                static_cast<int>(diffbox.y),
-                static_cast<int>(diffbox.width),
-                static_cast<int>(diffbox.height));
-
-    // 2. 确保选择区域在原始图像范围内（避免越界）
-    if (rawSelectionRect.empty())
-    {
-        qDebug() << "Error: Empty selection area in raw image.";
-        return;
-    }
-    // 裁剪选择区域，确保不超出原始图像边界
+    cv::Rect rawSelectionRect(static_cast<int>(diffbox.x), static_cast<int>(diffbox.y), static_cast<int>(diffbox.width), static_cast<int>(diffbox.height));
     cv::Rect roi = rawSelectionRect & cv::Rect(0, 0, image->cols, image->rows);
-    if (roi.width <= 0 || roi.height <= 0)
-    {
-        QMessageBox::warning(this, "警告", "选择区域无效（超出原始图像范围）！");
-        return;
+    if (roi.width <= 0 || roi.height <= 0) return;
+
+    cv::Mat croppedImage = (*image)(roi);
+    if (croppedImage.type() != CV_8UC3) {
+        cv::Mat temp; cv::cvtColor(croppedImage, temp, cv::COLOR_GRAY2BGR); croppedImage = temp;
     }
 
-    // 3. 直接从原始图像裁剪ROI，生成croppedImage
-    croppedImage = (*image)(roi);
-    // =========================================================================
-
-    // 图像类型统一（与原逻辑一致，确保后续OCR兼容）
-    if (croppedImage.type() != CV_8UC3)
-    {
-        cv::Mat temp;
-        cv::cvtColor(croppedImage, temp, cv::COLOR_GRAY2BGR);
-        croppedImage = temp;
-    }
-
-    // 目标字符串生成（与原逻辑一致）
     QString target_qstring = setdatetime();
-    std::string target_string = target_qstring.toStdString();
     ui->imagenum->setText(QString::number(totalImages));
 
-    // OCR检测（与原逻辑一致，输入为裁剪后的croppedImage）
     std::vector<std::vector<std::vector<int>>> boxes;
     det->Run(croppedImage, boxes);
     vector<std::pair<std::string, cv::Rect>> str_res = rec->RunOCR(boxes, croppedImage, cls);
 
-    // 按Y坐标排序（与原逻辑一致，基于croppedImage内的坐标排序）
-    std::sort(str_res.begin(), str_res.end(), [](const auto &a, const auto &b)
-    {
-        return a.second.y < b.second.y; // 按 Y 坐标升序排序（顶部元素在前）
+    std::sort(str_res.begin(), str_res.end(), [](const auto &a, const auto &b) {
+        return a.second.y < b.second.y;
     });
 
-    // 清空之前的结果
     allResults.clear();
-    detectedRects.clear();
-    // 处理OCR结果（坐标逻辑简化：直接映射回原始图像）
-    for (size_t i = 0; i < str_res.size(); i++)
-    {
+    g_lastDrawResults.clear(); // 清空旧框
+
+    for (size_t i = 0; i < str_res.size(); i++) {
         auto &res = str_res[i];
-        // 输出原始OCR识别结果
-        qDebug() << "number" << i+1 << "text：" << QString::fromStdString(res.first);
+        res.first.erase(std::remove_if(res.first.begin(), res.first.end(), [this](char c) { return !isAlnumOrChinese(c); }), res.first.end());
 
-        // 清理文本（与原逻辑一致）
-        res.first.erase(std::remove_if(res.first.begin(), res.first.end(), [this](char c)
-        { return !isAlnumOrChinese(c); }),
-                        res.first.end());
+        // 🔥 致命修复：去掉换行符，防止包含多行字符时比较全军覆没！
+        allResults += res.first;
 
-        // 拼接结果文本（与原逻辑一致）
-        if (i < str_res.size() - 1)
-        {
-            allResults += res.first + '\n';
-        }
-        else
-        {
-            allResults += res.first;
-        }
-
-
-        // ===================== 坐标处理简化：直接关联原始图像 =====================
-        // 1. res.second是OCR在croppedImage内的局部坐标，转换为原始图像坐标
-        detRect1.x = res.second.x + roi.x;    // croppedImage内x + roi在原始图像的x偏移
-        detRect1.y = res.second.y + roi.y;    // croppedImage内y + roi在原始图像的y偏移
-        detRect1.width = res.second.width;    // 宽度与croppedImage内一致（原始像素尺寸）
-        detRect1.height = res.second.height;  // 高度与croppedImage内一致
-
-        // 2. 转换为QRect（用于UI绘制检测框，仅此处涉及UI坐标映射，不影响核心逻辑）
-        // 注：此处仍需映射到UI坐标，因imageLabel显示的是缩放后的图像，确保框位置准确
-        double uiScaleX = static_cast<double>(imageLabel->width()) / image->cols;
-        double uiScaleY = static_cast<double>(imageLabel->height()) / image->rows;
-        detRect.setX(static_cast<int>(detRect1.x * uiScaleX));
-        detRect.setY(static_cast<int>(detRect1.y * uiScaleY));
-        detRect.setWidth(static_cast<int>(detRect1.width * uiScaleX));
-        detRect.setHeight(static_cast<int>(detRect1.height * uiScaleY));
-        detectedRects.push_back(detRect);
-        // =========================================================================
+        // 存入全局供重绘 (分数传-1代表只画框不写字)
+        CVDrawResult drawRes;
+        drawRes.rect = cv::Rect(res.second.x, res.second.y, res.second.width, res.second.height);
+        drawRes.score = -1.0;
+        g_lastDrawResults.push_back(drawRes);
     }
 
-    // OCR结果显示（与原逻辑一致）
-    ui->resultlabel_7->setText(QString::fromStdString(allResults));
-    ui->resultlabel_7->setWordWrap(true);
-    QFont font = ui->resultlabel_7->font();
-    font.setPointSize(16);
-    ui->resultlabel_7->setFont(font);
+    g_lastRoi = roi;
+    g_lastDetectTime = QDateTime::currentMSecsSinceEpoch();
+    slot_displayAndDetect(image); // 强制画面更新出绿框
 
-    // 绘制检测框（与原逻辑一致，基于转换后的UI坐标）
-    for (const auto &rect : detectedRects)
-    {
-        imageLabel->addSelectionRect(rect, 2);
-    }
-    imageLabel->update();
+    // 🔥 界面更新识别字符
+    QString finalOCRString = QString::fromStdString(allResults).trimmed();
+    ui->resultlabel_7->setText(finalOCRString);
 
-    // 识别结果判定与后续逻辑（与原逻辑完全一致）
-    if (j % x == 0)
-    {
-        if (allResults.empty())
-        {
-            if ((ui->comboBox->currentIndex() == 1) || (ui->comboBox->currentIndex() == 3))
-            {
-                QString saveDir = selectedDir + "/ng/";
-                saveImage2Async("jpg", saveDir);
+    if (j % x == 0) {
+        QString qTarget = target_qstring.trimmed();
+        // 判定逻辑（去除空白后比较）
+        if (finalOCRString.isEmpty() || finalOCRString != qTarget) {
+            if ((ui->comboBox->currentIndex() == 1) || (ui->comboBox->currentIndex() == 3)) {
+                QString saveDir = selectedDir + "/ng/"; saveImage2Async("jpg", saveDir);
             }
-            ngImages++;
-            totalImages++;
+            ngImages++; totalImages++;
             ui->resultlabel->setText(QString("<font size='10' color='red'>错误！</font>"));
-            if (wrongindex == 0)
-            {
-                qDebug() << "wrongindex=0, calling wrongremove immediately";
-                wrongremove();
+            if (wrongindex == 0) wrongremove();
+            else removalQueue.push(std::make_pair(totalImages, totalImages + wrongindex));
+        } else {
+            totalImages++;
+            if ((ui->comboBox->currentIndex() == 2) || (ui->comboBox->currentIndex() == 3)) {
+                QString saveDir = selectedDir + "/ok/"; saveImage2Async("jpg", saveDir);
             }
-            else
-            {
-                qDebug() << "wrongindex=" << wrongindex << ", adding to queue for delayed removal";
-                removalQueue.push(std::make_pair(totalImages, totalImages + wrongindex));
-            }
-        }
-        else
-        {
-            if (allResults == target_string)
-            {
-                totalImages++;
-                if ((ui->comboBox->currentIndex() == 2) || (ui->comboBox->currentIndex() == 3))
-                {
-                    QString saveDir = selectedDir + "/ok/";
-                    saveImage2Async("jpg", saveDir);
-                }
-                ui->resultlabel->setText(QString("<font size='10' color='SpringGreen'>正确！</font><br>"));
-                rightremove();
-            }
-            else
-            {
-                if ((ui->comboBox->currentIndex() == 1) || (ui->comboBox->currentIndex() == 3))
-                {
-                    QString saveDir = selectedDir + "/ng/";
-                    saveImage2Async("jpg", saveDir);
-                }
-                ngImages++;
-                totalImages++;
-                ui->resultlabel->setText(QString("<font size='10' color='red'>错误！</font>"));
-                if (wrongindex == 0)
-                {
-                    qDebug() << "wrongindex=0, calling wrongremove immediately";
-                    wrongremove();
-                }
-                else
-                {
-                    qDebug() << "wrongindex=" << wrongindex << ", adding to queue for delayed removal";
-                    removalQueue.push(std::make_pair(totalImages, totalImages + wrongindex));
-                }
-            }
+            ui->resultlabel->setText(QString("<font size='10' color='SpringGreen'>正确！</font><br>"));
+            rightremove();
         }
     }
 
-    // 更新统计信息（与原逻辑一致）
     double hegerate = (1 - static_cast<double>(ngImages) / totalImages) * 100;
-    QString str1 = QString::number(hegerate, 'f', 1);
-    ui->lineBoxIndex_6->setText(str1);
+    ui->lineBoxIndex_6->setText(QString::number(hegerate, 'f', 1));
     ui->ngnum->setText(QString("%1").arg(ngImages));
     ui->imagenum->setText(QString("%1").arg(totalImages));
-
-    // 显示检测耗时（与原逻辑一致）
     auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    ui->speedLabel->setText(QString("检测耗时 %1 毫秒").arg(duration));
-
+    ui->speedLabel->setText(QString("检测耗时 %1 毫秒").arg(std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count()));
     j++;
 }
 
@@ -1513,172 +1138,6 @@ void Widget::slot_readAndDetect3(cv::Mat *image, Rect2d diffbox)
     j++;
 }
 
-//根据ui缩放版
-//void Widget::slot_readAndDetect3(cv::Mat *image, Rect2d diffbox)
-//{
-//    // 检查延迟剔除队列
-//    if (!removalQueue.empty() && totalImages >= removalQueue.front().second - 1)
-//    {
-//        qDebug() << "wrongindex" << wrongindex;
-//        wrongremove();
-//        removalQueue.pop();
-//    }
-
-//    currentImagesSnapshot = totalImages;
-//    auto start = std::chrono::high_resolution_clock::now();
-
-//    if (!image || image->empty())
-//    {
-//        qDebug() << "Error: Invalid input image.";
-//        return;
-//    }
-
-//    cv::Mat croppedImage;
-
-//    imageLabel->setColor(color);
-
-//    if (judge)
-//    {
-//        j = 1;
-//        x++;
-//        judge = false;
-//    }
-
-//    if ((j - 1) % x == 0)
-//    {
-//        imageLabel->clearGreenRects();
-//        detectedRects.clear();
-//        string1.clear();
-//    }
-
-//    // 计算缩放和偏移
-//    double scaleX = static_cast<double>(ui->image_undetected->width()) / image->cols;
-//    double scaleY = static_cast<double>(ui->image_undetected->height()) / image->rows;
-//    int offsetX = (ui->image_undetected->width() - scaleX * image->cols) / 2;
-//    int offsetY = (ui->image_undetected->height() - scaleY * image->rows) / 2;
-
-//    // 构建选择区域
-//    if (first)
-//    {
-//        QRect selectionRect1(
-//            static_cast<int>(diffbox.x * scaleX + offsetX),
-//            static_cast<int>(diffbox.y * scaleY + offsetY),
-//            static_cast<int>(diffbox.width * scaleX),
-//            static_cast<int>(diffbox.height * scaleY));
-//        selectionRect = selectionRect1;
-//    }
-//    else
-//    {
-//        QRect selectionRect1(
-//            static_cast<int>(diffbox.x),
-//            static_cast<int>(diffbox.y),
-//            static_cast<int>(diffbox.width),
-//            static_cast<int>(diffbox.height));
-//        selectionRect = selectionRect1;
-//    }
-
-//    if (selectionRect.isNull())
-//    {
-//        QMessageBox::warning(this, "警告", "没有选择区域！");
-//        return;
-//    }
-
-//    xRatio = static_cast<double>(image->cols) / imageLabel->width();
-//    yRatio = static_cast<double>(image->rows) / imageLabel->height();
-
-//    roi = cv::Rect(
-//        static_cast<int>(selectionRect.left() * xRatio),
-//        static_cast<int>(selectionRect.top() * yRatio),
-//        static_cast<int>(selectionRect.width() * xRatio),
-//        static_cast<int>(selectionRect.height() * yRatio));
-
-//    roi &= cv::Rect(0, 0, image->cols, image->rows);
-
-//    if (roi.width <= 0 || roi.height <= 0)
-//    {
-//        QMessageBox::warning(this, "警告", "选择区域无效！");
-//        return;
-//    }
-
-//    croppedImage = (*image)(roi);
-
-//    if (croppedImage.type() != CV_8UC3)
-//    {
-//        cv::Mat temp;
-//        cv::cvtColor(croppedImage, temp, cv::COLOR_GRAY2BGR);
-//        croppedImage = temp;
-//    }
-
-//    emit imgshibie(&croppedImage);
-
-//    ui->imagenum->setText(QString::number(totalImages));
-
-//    // 执行模板匹配
-//    QString text = ui->lineEdit_yuzhi->text();
-//    int number = text.toDouble();
-//    int ssimvalue = 100 * templatematch->run1(digitTemplates);
-//    ui->lineBoxIndex->setText(QString::number(ssimvalue));
-
-//    // 判断是否达到用户阈值
-//    QString judge = (ssimvalue > number ? "yes" : "no");
-
-//    for (const auto &rect : detectedRects)
-//    {
-//        imageLabel->addSelectionRect(rect, 2);
-//    }
-//    imageLabel->update();
-
-//    if (j % x == 0)
-//    {
-//        if (judge == "no")
-//        {
-//            if ((ui->comboBox->currentIndex() == 1) || (ui->comboBox->currentIndex() == 3))
-//            {
-//                QString saveDir = selectedDir + "/ng/";
-//                saveImage2("jpg", saveDir);
-//            }
-
-//            ngImages++;
-//            totalImages++;
-//            ui->resultlabel->setText(QString("<font size='10' color='red'>错误！</font>"));
-
-//            if (wrongindex == 0)
-//            {
-//                qDebug() << "wrongindex=0, calling wrongremove immediately";
-//                wrongremove();
-//            }
-//            else
-//            {
-//                qDebug() << "wrongindex=" << wrongindex << ", adding to queue for delayed removal";
-//                removalQueue.push(std::make_pair(totalImages, totalImages + wrongindex));
-//            }
-//        }
-//        else
-//        {
-//            totalImages++;
-//            if ((ui->comboBox->currentIndex() == 2) || (ui->comboBox->currentIndex() == 3))
-//            {
-//                QString saveDir = selectedDir + "/ok/";
-//                saveImage2("jpg", saveDir);
-//            }
-//            ui->resultlabel->setText(QString("<font size='10' color='SpringGreen'>正确！</font><br>"));
-//            rightremove();
-//        }
-//    }
-
-//    // 更新统计信息
-//    double hegerate = (1 - static_cast<double>(ngImages) / totalImages) * 100;
-//    QString str1 = QString::number(hegerate, 'f', 1);
-//    ui->lineBoxIndex_6->setText(str1);
-//    ui->ngnum->setText(QString("%1").arg(ngImages));
-//    ui->imagenum->setText(QString("%1").arg(totalImages));
-
-//    auto end = std::chrono::high_resolution_clock::now();
-//    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-//    ui->speedLabel->setText(QString("检测耗时 %1 毫秒").arg(duration));
-
-//    j++;
-//}
 
 /**
  * @brief 字库匹配检测槽函数
@@ -1686,20 +1145,12 @@ void Widget::slot_readAndDetect3(cv::Mat *image, Rect2d diffbox)
  * @param diffbox 检测区域
  * @details 使用字符模板库进行字符数量匹配检测
  */
-
-
 void Widget::slot_readAndDetect4(cv::Mat *image, Rect2d diffbox)
 {
-//    if (digitTemplates.empty()) {
-//        // 弹窗提示错误信息（父窗口为当前Widget，标题"错误"，内容说明问题）
-//        QMessageBox::warning(this, "错误", "未选择字库，无法进行模板匹配！");
-//        return;  // 终止函数，不执行后续逻辑
-//    }
-
-    // 检查延迟剔除队列
+    // 1. 检查延迟剔除队列 (PLC 信号处理)
     if (!removalQueue.empty() && totalImages >= removalQueue.front().second - 1)
     {
-        qDebug() << "wrongindex" << wrongindex;
+        qDebug() << "PLC延迟剔除触发，当前总数:" << totalImages;
         wrongremove();
         removalQueue.pop();
     }
@@ -1707,16 +1158,14 @@ void Widget::slot_readAndDetect4(cv::Mat *image, Rect2d diffbox)
     currentImagesSnapshot = totalImages;
     auto start = std::chrono::high_resolution_clock::now();
 
+    // 2. 图像有效性校验
     if (!image || image->empty())
     {
-        qDebug() << "Error: Invalid input image.";
+        qDebug() << "错误: 输入图像无效";
         return;
     }
 
-    cv::Mat croppedImage;
-
-    imageLabel->setColor(color);
-
+    // 3. 判定状态重置
     if (judge)
     {
         j = 1;
@@ -1731,33 +1180,26 @@ void Widget::slot_readAndDetect4(cv::Mat *image, Rect2d diffbox)
         string1.clear();
     }
 
-    // ===================== 完全基于原始图像坐标 =====================
-    // 1. 直接使用传入的diffbox作为原始图像上的选择区域
+    // ===================== 坐标处理与 ROI 裁剪 (带鲁棒性优化) =====================
+    // 核心改进：增加 20 像素的呼吸边距 (Padding)，防止框太小导致底层匹配失败
+    int padding = 20;
     cv::Rect rawSelectionRect(
-                static_cast<int>(diffbox.x),
-                static_cast<int>(diffbox.y),
-                static_cast<int>(diffbox.width),
-                static_cast<int>(diffbox.height));
+        static_cast<int>(diffbox.x) - padding,
+        static_cast<int>(diffbox.y) - padding,
+        static_cast<int>(diffbox.width) + padding * 2,
+        static_cast<int>(diffbox.height) + padding * 2
+    );
 
-    // 2. 确保选择区域在原始图像范围内（避免越界）
-    if (rawSelectionRect.empty())
-    {
-        qDebug() << "Error: Empty selection area in raw image.";
-        return;
-    }
-    // 裁剪选择区域至原始图像边界内
+    // 确保裁剪区域不越界
     cv::Rect roi = rawSelectionRect & cv::Rect(0, 0, image->cols, image->rows);
     if (roi.width <= 0 || roi.height <= 0)
     {
-        QMessageBox::warning(this, "警告", "选择区域无效（超出原始图像范围）！");
+        QMessageBox::warning(this, "警告", "识别区域超出原图范围！");
         return;
     }
 
-    // 3. 直接从原始图像裁剪ROI生成croppedImage
-    croppedImage = (*image)(roi);
-    // =========================================================================
-
-    // 图像类型统一（灰度图转彩色图）
+    cv::Mat croppedImage = (*image)(roi);
+    // 统一转换为 BGR 格式
     if (croppedImage.type() != CV_8UC3)
     {
         cv::Mat temp;
@@ -1765,43 +1207,32 @@ void Widget::slot_readAndDetect4(cv::Mat *image, Rect2d diffbox)
         croppedImage = temp;
     }
 
-    // 发射裁剪后图像信号
+    // 发射给其他可能需要的组件
     emit imgshibie(&croppedImage);
-
-    // 更新图像计数显示
     ui->imagenum->setText(QString::number(totalImages));
 
-    // 获取目标字符串长度
+    // ===================== 目标字符解析 (你的正则逻辑) =====================
     QString targetString = ui->dateEdit->toPlainText();
     int targetNum = 0;
-
-    // 使用正则表达式解析字库变体
-    // 升级正则表达式：允许 [数字、字母、中文] 后面跟带括号的数字作为一个整体
     QRegularExpression regex(R"(([\d[A-Za-z\x{4e00}-\x{9fa5}]\(\d+\))|(\d)|([A-Za-z])|([\x{4e00}-\x{9fa5}]))");
     QRegularExpressionMatchIterator matchIt = regex.globalMatch(targetString);
 
     while (matchIt.hasNext()) {
-    matchIt.next();
-    targetNum++; // 每匹配到一个有效字符（数字/英文/中文），目标数 +1
+        matchIt.next();
+        targetNum++;
     }
 
-    // 如果正则匹配失败， fallback 到字符串长度（兼容旧逻辑）
     if (targetNum == 0 && !targetString.isEmpty()) {
         targetNum = targetString.length();
     }
 
-    qDebug() << "targetnum" << targetNum << "(parsed from:" << targetString << ")";
-
-    // 运行字库匹配
+    // ===================== 执行匹配与结果存储 =====================
+    // 运行底层匹配算法
     int detectNum = templatematch->run3(digitTemplates);
     QString judgeResult = (detectNum == targetNum ? "ok" : "no");
 
-
-    // ===================== 核心修改：将结果缓存到全局变量，并触发重绘 =====================
-    // 1. 清空上一轮的旧数据
+    // 更新全局绘制数据 (供 slot_displayAndDetect 刷新画面)
     g_lastDrawResults.clear();
-
-    // 2. 将 run3 算出来的最新匹配结果存入全局记忆结构中
     for (const auto& match : templatematch->lastMatchResults) {
         CVDrawResult res;
         res.rect = std::get<0>(match);
@@ -1809,29 +1240,25 @@ void Widget::slot_readAndDetect4(cv::Mat *image, Rect2d diffbox)
         g_lastDrawResults.push_back(res);
     }
 
-    // 3. 记录当前的检测 ROI 区域（用于全图坐标还原）以及时间戳（用于 2 秒后自动消散）
-    g_lastRoi = roi;
+    g_lastRoi = roi; // 记住本次裁剪的偏移，用于还原框的坐标位置
     g_lastDetectTime = QDateTime::currentMSecsSinceEpoch();
 
-    // 4. 剥夺旧版 imageLabel 自己画框的权力，清理底层虚线框数据，防止重影
+    // 清理旧版的 imageLabel 虚线框数据
     detectedRects.clear();
     imageLabel->clearGreenRects();
 
-    // 5. 强制调用一次界面刷新。
-    // 注意：此时传入的是原图指针，新版的 slot_displayAndDetect 内部会执行 clone 并盖上绿框
+    // 触发 UI 画面刷新：此时画面会根据 g_lastDrawResults 自动画上绿框和分数
     slot_displayAndDetect(image);
-    // =========================================================================
 
-
-    // 结果判定与后续逻辑
+    // ===================== 判定与数据更新 (你的原有逻辑) =====================
     if (j % x == 0)
     {
         if (judgeResult == "no")
         {
+            // NG 图像保存
             if ((ui->comboBox->currentIndex() == 1) || (ui->comboBox->currentIndex() == 3))
             {
                 QString saveDir = selectedDir + "/ng/";
-                // 此时保存的图像，因为上一步调用了 slot_displayAndDetect，已经完美带有绿框和分数了
                 saveImage2("png", saveDir);
             }
 
@@ -1841,22 +1268,20 @@ void Widget::slot_readAndDetect4(cv::Mat *image, Rect2d diffbox)
 
             if (wrongindex == 0)
             {
-                qDebug() << "wrongindex=0, calling wrongremove immediately";
                 wrongremove();
             }
             else
             {
-                qDebug() << "wrongindex=" << wrongindex << ", adding to queue for delayed removal";
                 removalQueue.push(std::make_pair(totalImages, totalImages + wrongindex));
             }
         }
         else
         {
+            // OK 图像保存
             totalImages++;
             if ((ui->comboBox->currentIndex() == 2) || (ui->comboBox->currentIndex() == 3))
             {
                 QString saveDir = selectedDir + "/ok/";
-                // 此时保存的图像，同样带有绿框和分数
                 saveImage2("png", saveDir);
             }
             ui->resultlabel->setText(QString("<font size='10' color='SpringGreen'>正确！</font><br>"));
@@ -1864,14 +1289,12 @@ void Widget::slot_readAndDetect4(cv::Mat *image, Rect2d diffbox)
         }
     }
 
-    // 更新统计信息
-    double hegerate = (1 - static_cast<double>(ngImages) / totalImages) * 100;
-    QString str1 = QString::number(hegerate, 'f', 1);
-    ui->lineBoxIndex_6->setText(str1);
-    ui->ngnum->setText(QString("%1").arg(ngImages));
-    ui->imagenum->setText(QString("%1").arg(totalImages));
+    // 更新界面统计标签 (合格率、计数器、耗时)
+    double hegerate = (totalImages > 0) ? (1 - static_cast<double>(ngImages) / totalImages) * 100 : 0;
+    ui->lineBoxIndex_6->setText(QString::number(hegerate, 'f', 1));
+    ui->ngnum->setText(QString::number(ngImages));
+    ui->imagenum->setText(QString::number(totalImages));
 
-    // 显示检测耗时
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
     ui->speedLabel->setText(QString("检测耗时 %1 毫秒").arg(duration));
@@ -1879,264 +1302,56 @@ void Widget::slot_readAndDetect4(cv::Mat *image, Rect2d diffbox)
     j++;
 }
 
-////根据ui缩放版
-//void Widget::slot_readAndDetect4(cv::Mat *image, Rect2d diffbox)
-//{
-//    // 检查延迟剔除队列
-//    if (!removalQueue.empty() && totalImages >= removalQueue.front().second - 1)
-//    {
-//        qDebug() << "wrongindex" << wrongindex;
-//        wrongremove();
-//        removalQueue.pop();
-//    }
-
-//    currentImagesSnapshot = totalImages;
-//    auto start = std::chrono::high_resolution_clock::now();
-
-//    if (!image || image->empty())
-//    {
-//        qDebug() << "Error: Invalid input image.";
-//        return;
-//    }
-
-//    cv::Mat croppedImage;
-
-//    imageLabel->setColor(color);
-
-//    if (judge)
-//    {
-//        j = 1;
-//        x++;
-//        judge = false;
-//    }
-
-//    if ((j - 1) % x == 0)
-//    {
-//        imageLabel->clearGreenRects();
-//        detectedRects.clear();
-//        string1.clear();
-//    }
-
-//    double scaleX = static_cast<double>(ui->image_undetected->width()) / image->cols;
-//    double scaleY = static_cast<double>(ui->image_undetected->height()) / image->rows;
-//    int offsetX = (ui->image_undetected->width() - scaleX * image->cols) / 2;
-//    int offsetY = (ui->image_undetected->height() - scaleY * image->rows) / 2;
-
-//    if (first)
-//    {
-//        QRect selectionRect1(
-//            static_cast<int>(diffbox.x * scaleX + offsetX),
-//            static_cast<int>(diffbox.y * scaleY + offsetY),
-//            static_cast<int>(diffbox.width * scaleX),
-//            static_cast<int>(diffbox.height * scaleY));
-//        selectionRect = selectionRect1;
-//    }
-//    else
-//    {
-//        QRect selectionRect1(
-//            static_cast<int>(diffbox.x),
-//            static_cast<int>(diffbox.y),
-//            static_cast<int>(diffbox.width),
-//            static_cast<int>(diffbox.height));
-//        selectionRect = selectionRect1;
-//    }
-
-//    if (selectionRect.isNull())
-//    {
-//        QMessageBox::warning(this, "警告", "没有选择区域！");
-//        return;
-//    }
-
-//    xRatio = static_cast<double>(image->cols) / imageLabel->width();
-//    yRatio = static_cast<double>(image->rows) / imageLabel->height();
-
-//    roi = cv::Rect(
-//        static_cast<int>(selectionRect.left() * xRatio),
-//        static_cast<int>(selectionRect.top() * yRatio),
-//        static_cast<int>(selectionRect.width() * xRatio),
-//        static_cast<int>(selectionRect.height() * yRatio));
-
-//    roi &= cv::Rect(0, 0, image->cols, image->rows);
-
-//    if (roi.width <= 0 || roi.height <= 0)
-//    {
-//        QMessageBox::warning(this, "警告", "选择区域无效！");
-//        return;
-//    }
-
-//    croppedImage = (*image)(roi);
-
-//    if (croppedImage.type() != CV_8UC3)
-//    {
-//        cv::Mat temp;
-//        cv::cvtColor(croppedImage, temp, cv::COLOR_GRAY2BGR);
-//        croppedImage = temp;
-//    }
-
-//    emit imgshibie(&croppedImage);
-
-//    ui->imagenum->setText(QString::number(totalImages));
-
-//    // 执行字库匹配
-//    QString text = ui->lineEdit_yuzhi->text();
-//    int number = text.toDouble();
-//    QString totalnum = ui->lineEdit_14->text();
-//    int number1 = totalnum.toInt();
-
-//    int detectnum = templatematch->run3(digitTemplates);
-//    QString judge = (detectnum == number1 ? "ok" : "no");
-//    ui->lineBoxIndex_5->setText(QString::number(detectnum));
-
-//    for (const auto &rect : detectedRects)
-//    {
-//        imageLabel->addSelectionRect(rect, 2);
-//    }
-//    imageLabel->update();
-
-//    if (j % x == 0)
-//    {
-//        if (judge == "no")
-//        {
-//            if ((ui->comboBox->currentIndex() == 1) || (ui->comboBox->currentIndex() == 3))
-//            {
-//                QString saveDir = selectedDir + "/ng/";
-//                saveImage2("jpg", saveDir);
-//            }
-
-//            ngImages++;
-//            totalImages++;
-//            ui->resultlabel->setText(QString("<font size='10' color='red'>错误！</font>"));
-
-//            if (wrongindex == 0)
-//            {
-//                qDebug() << "wrongindex=0, calling wrongremove immediately";
-//                wrongremove();
-//            }
-//            else
-//            {
-//                qDebug() << "wrongindex=" << wrongindex << ", adding to queue for delayed removal";
-//                removalQueue.push(std::make_pair(totalImages, totalImages + wrongindex));
-//            }
-//        }
-//        else
-//        {
-//            totalImages++;
-//            if ((ui->comboBox->currentIndex() == 2) || (ui->comboBox->currentIndex() == 3))
-//            {
-//                QString saveDir = selectedDir + "/ok/";
-//                saveImage2("jpg", saveDir);
-//            }
-//            ui->resultlabel->setText(QString("<font size='10' color='SpringGreen'>正确！</font><br>"));
-//            rightremove();
-//        }
-//    }
-
-//    double hegerate = (1 - static_cast<double>(ngImages) / totalImages) * 100;
-//    QString str1 = QString::number(hegerate, 'f', 1);
-//    ui->lineBoxIndex_6->setText(str1);
-//    ui->ngnum->setText(QString("%1").arg(ngImages));
-//    ui->imagenum->setText(QString("%1").arg(totalImages));
-
-//    auto end = std::chrono::high_resolution_clock::now();
-//    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-//    ui->speedLabel->setText(QString("检测耗时 %1 毫秒").arg(duration));
-
-//    j++;
-//}
-
 /**
  * @brief 软触发拍照按钮点击槽函数
  * @details 发送软触发信号给相机，采集一张图像并进行识别
  */
 void Widget::on_VideoShoot_clicked()
 {
-    if (!m_bOpenDevice)
-    {
+    if (!m_bOpenDevice) {
         QMessageBox::warning(this, "警告", "采集失败,请打开设备！");
         return;
     }
 
+    // 设置曝光（建议在拍照前确保设置生效）
     int exposureValue = ui->spinBox->value();
-    qDebug() << "SetExposureTime:" <<exposureValue<<m_pcMyCamera->SetFloatValue("ExposureTime", exposureValue);
-    //    QMessageBox::information(this, "提示", "相机曝光设置成功！");
-
-    std::unique_ptr<Mat> image = make_unique<Mat>();
-
+    m_pcMyCamera->SetFloatValue("ExposureTime", exposureValue);
 
     try {
-        // 确保相机处于触发模式
-        m_pcMyCamera->SetEnumValue("TriggerMode", 1);     // 触发模式ON
-        m_pcMyCamera->SetEnumValue("TriggerSource", 7);   // 软触发源
-
-
+        m_pcMyCamera->SetEnumValue("TriggerMode", 1);
+        m_pcMyCamera->SetEnumValue("TriggerSource", 7); // 软触发
     } catch (...) {
         QMessageBox::warning(this, "警告", "相机配置失败！");
         return;
     }
 
-    // 发送软触发
-    int nRet = m_pcMyCamera->CommandExecute("TriggerSoftware");
-    if (MV_OK != nRet)
-    {
-        QMessageBox::warning(this, "警告", "软触发执行失败！");
+    // 执行触发
+    m_pcMyCamera->CommandExecute("TriggerSoftware");
+
+    // 等待图像传输完成（根据你的相机性能调整）
+    QThread::msleep(ui->spinBox->value() / 1000 + 100);
+
+    // 🔥 核心修改：将采集到的图像存入类成员变量 myImage，而不是局部变量
+    // 这样图像就能在函数结束后继续存在于内存中
+    *myImage = m_pcMyCamera->GetImage();
+
+    if (myImage->empty()) {
+        QMessageBox::warning(this, "警告", "未能获取有效图像！");
         return;
     }
 
-
-    // 等待图像就绪
-    int exposureTime = ui->spinBox->value();
-    int waitTime = exposureTime / 1000 + 200; // 曝光时间(us→ms) + 200ms缓冲
-    QThread::msleep(waitTime);
-
-    // 获取图像
-    *image = m_pcMyCamera->GetImage();
-
-    // 验证图像
-    if (image->empty())
-    {
-        QMessageBox::warning(this, "警告", "未能获取有效图像！请检查相机连接。");
-        return;
-    }
-
-
-
-    // 处理旋转
+    // 处理旋转逻辑（直接作用于成员变量）
     int rotationIndex = ui->comboBox_2->currentIndex();
-    if (rotationIndex == 1)
-    {
-        cv::Mat rotatedImg;
-        cv::rotate(*image, rotatedImg, cv::ROTATE_90_CLOCKWISE);
-        *image = rotatedImg;
-        qDebug() << "Image rotated 90° clockwise";
-    }
-    else if (rotationIndex == 2)
-    {
-        cv::Mat rotatedImg;
-        cv::rotate(*image, rotatedImg, cv::ROTATE_90_COUNTERCLOCKWISE);
-        *image = rotatedImg;
-        qDebug() << "Image rotated 90° counter-clockwise";
-    }
-    else if (rotationIndex == 3)
-    {
-        cv::Mat rotatedImg;
-        cv::rotate(*image, rotatedImg, cv::ROTATE_180);
-        *image = rotatedImg;
-        qDebug() << "Image rotated 180°";
-    }
+    if (rotationIndex == 1) cv::rotate(*myImage, *myImage, cv::ROTATE_90_CLOCKWISE);
+    else if (rotationIndex == 2) cv::rotate(*myImage, *myImage, cv::ROTATE_90_COUNTERCLOCKWISE);
+    else if (rotationIndex == 3) cv::rotate(*myImage, *myImage, cv::ROTATE_180);
 
-    // 显示和识别
-    first = true;
-    QRect cvDiffbox = imageLabel->getSelectionRect();
-    cv::Rect2d diffbox(cvDiffbox.x(), cvDiffbox.y(),
-                       cvDiffbox.width(), cvDiffbox.height());
+    // 在 UI 上显示最新的这一帧
+    slot_displayAndDetect(myImage);
 
-
-    slot_displayAndDetect(image.get());
-    slot_readAndDetect(image.get(), diffbox);
-
-
+    // 注意：这里我们只拍照显示，不强制运行识别。用户可以在这张图上画框。
+    ui->statusLabel->setText("单词采集完成，请在图上画框并点击保存模板");
 }
-
 /**
  * @brief 连续拍照按钮点击槽函数
  * @details 启动工作线程，进入连续采集识别模式
@@ -2942,54 +2157,15 @@ void Widget::on_pushButton_3_clicked()
  * @brief 保存当前图像按钮点击槽函数
  * @details 打开文件保存对话框，保存当前显示的图像
  */
-//void Widget::on_pushButton_5_clicked()
-//{
-//    QString fileName = QFileDialog::getSaveFileName(this, "save image",
-//                                                    "C:/Users/Administrator/Desktop/",
-//                                                    "JPEG Files (*.jpg);;PNG Files (*.png)");
-
-//    if (fileName.isEmpty())
-//    {
-//        QMessageBox::information(this, "提示", "未选择保存文件！");
-//        return;
-//    }
-
-//    QFileInfo fileInfo(fileName);
-//    QString format = fileInfo.suffix();
-//    QString savePath = fileInfo.path() + "/";
-
-//    saveImage2Async(format, savePath);
-//    // 关键：将所有参数保存到用户选择的文件夹中
-//    saveSettingsToDir(savePath);
-
-//    // 提示参数已保存
-//    QMessageBox::information(this, "提示", "图片和参数已保存到：\n" + savePath);
-
-
-//}
-
-//无需命名
 void Widget::on_pushButton_5_clicked()
 {
-//    // 只选择文件夹，不涉及文件名
-//    QString savePath = QFileDialog::getExistingDirectory(
-//        this,
-//        "选择保存文件夹",
-//        "C:/Users/Administrator/Desktop/",
-//        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks
-//    );
-
-//    if (savePath.isEmpty())
-//    {
-//        QMessageBox::information(this, "提示", "未选择保存文件夹！");
-//        return;
-//    }
-
-//    // 确保路径以斜杠结尾
-//    if (!savePath.endsWith("/") && !savePath.endsWith("\\"))
-//    {
-//        savePath += "/";
-//    }
+    // ==========================================================
+    // 🔥 核心修复 1：拦截检查。确保存图时内存里确实有刚刚拍下的原图！
+    // ==========================================================
+    if (!myImage || myImage->empty()) {
+        QMessageBox::warning(this, "提示", "请先点击【软触发拍照】获取一张图像后，再进行保存！");
+        return;
+    }
 
     QString parentDir = "D:/muban/";
 
@@ -2997,14 +2173,14 @@ void Widget::on_pushButton_5_clicked()
     QString newFolderName = QInputDialog::getText(
         this,
         "输入新文件夹名称",
-        "请输入要创建的文件夹名称：",
+        "请输入要创建的模板文件夹名称：",
         QLineEdit::Normal,
         "",
         &ok
     );
 
     if (!ok || newFolderName.isEmpty()) {
-        QMessageBox::information(this, "提示", "未输入文件夹名称！");
+        QMessageBox::information(this, "提示", "未输入文件夹名称，已取消保存！");
         return;
     }
 
@@ -3035,41 +2211,102 @@ void Widget::on_pushButton_5_clicked()
 
     // 创建新文件夹
     if (!dir.mkpath(".")) {
-        QMessageBox::warning(this, "警告", "创建模板失败：" + savePath);
+        QMessageBox::warning(this, "警告", "创建模板文件夹失败：" + savePath);
         return;
     }
 
+    // ==========================================================
+    // 🔥 核心修复 2：在保存前，主动去抓取用户刚刚在界面上画的框！
+    // ==========================================================
+    QRect uiRect = imageLabel->getSelectionRect();
+    if (!uiRect.isNull() && uiRect.width() > 0 && uiRect.height() > 0) {
 
+        unsigned int camWidth = 0, camHeight = 0;
+        if (m_pcMyCamera) {
+            MVCC_INTVALUE_EX stWidth = {0};
+            MVCC_INTVALUE_EX stHeight = {0};
+            if (m_pcMyCamera->GetIntValue("Width", &stWidth) == MV_OK) camWidth = stWidth.nCurValue;
+            if (m_pcMyCamera->GetIntValue("Height", &stHeight) == MV_OK) camHeight = stHeight.nCurValue;
 
+            // 处理旋转造成的宽高互换
+            int rotationIndex = ui->comboBox_2->currentIndex();
+            if (rotationIndex == 1 || rotationIndex == 2) {
+                std::swap(camWidth, camHeight);
+            }
+        }
 
-    // 后续可以继续使用 savePath 进行操作
+        // 兜底策略：使用全局 myImage 的分辨率
+        if (camWidth == 0 && myImage && !myImage->empty()) {
+            camWidth = myImage->cols;
+            camHeight = myImage->rows;
+        }
 
-    // 固定格式为png
-    QString format = "png";
+        if (camWidth > 0 && camHeight > 0) {
+            QSize originalSize(camWidth, camHeight);
+            QSize labelSize = imageLabel->size();
+            QSize scaledSize = originalSize.scaled(labelSize, Qt::KeepAspectRatio);
 
-    // 🔥 关键修改：直接使用已保存的框坐标（来自线程信号）
+            int xOffset = (labelSize.width() - scaledSize.width()) / 2;
+            int yOffset = (labelSize.height() - scaledSize.height()) / 2;
+
+            double realX = uiRect.x() - xOffset;
+            double realY = uiRect.y() - yOffset;
+            double xRatio = static_cast<double>(camWidth) / scaledSize.width();
+            double yRatio = static_cast<double>(camHeight) / scaledSize.height();
+
+            cv::Rect2d physicalBox(
+                std::max(0.0, realX * xRatio),
+                std::max(0.0, realY * yRatio),
+                uiRect.width() * xRatio,
+                uiRect.height() * yRatio
+            );
+
+            // 越界保护
+            if (physicalBox.x + physicalBox.width > camWidth) physicalBox.width = camWidth - physicalBox.x;
+            if (physicalBox.y + physicalBox.height > camHeight) physicalBox.height = camHeight - physicalBox.y;
+
+            // 同步更新全局底层变量
+            savedDetectionBox = physicalBox;
+            savedTrackingBox = physicalBox;
+            hasValidBoxes = true;
+        }
+    }
+
+    // 拦截判断：如果即没点启动，也没在刚刚拍下的画面上画框
     if (!hasValidBoxes) {
         QMessageBox::warning(this, "警告",
-            "当前没有有效的框坐标！\n请先运行采集（点击plcbtn并完成框选择）");
+            "当前没有有效的识别区域！\n请在画面上用鼠标拖拽画出一个框后再点击保存。");
+        // 如果因为没画框拦截了，记得把刚刚建好的空文件夹删掉以免制造垃圾数据
+        dir.removeRecursively();
         return;
     }
 
     qDebug() << "save box:";
     qDebug() << "detectionbox:" << savedDetectionBox.x << savedDetectionBox.y
              << savedDetectionBox.width << savedDetectionBox.height;
-    qDebug() << "trackbox:" << savedTrackingBox.x << savedTrackingBox.y
-             << savedTrackingBox.width << savedTrackingBox.height;
 
-    // 调用保存函数（文件名由saveImage2Async内部自动生成）
-    saveImage2Async(format, savePath);
+    // ==========================================================
+    // 🔥 核心修复 3：不再使用 saveImage2Async 重新拍照
+    // 直接使用 cv::imwrite 保存全局的 *myImage (原始无损图)
+    // ==========================================================
+    QString imageFileName = savePath + "/template_raw.png";
 
-    currentTemplateDirPath=savePath;
+    // toLocal8Bit 防止中文路径保存失败
+    if (cv::imwrite(imageFileName.toLocal8Bit().toStdString(), *myImage)) {
 
-    // 保存参数到该文件夹（包括框坐标）
-    saveSettingsToDir(savePath);
+        // 更新当前的模板路径
+        currentTemplateDirPath = savePath;
 
-    QMessageBox::information(this, "提示",
-        "图片和参数已保存到：\n" + savePath);
+        // 保存对应的检测参数文件 (app_settings.appset) 以及物理框坐标
+        saveSettingsToDir(savePath);
+
+        QMessageBox::information(this, "提示", "原图与检测参数已成功保存至：\n" + savePath);
+
+    } else {
+        QMessageBox::critical(this, "错误", "图像文件保存失败！请检查系统路径权限。");
+        // 保存失败时清理空文件夹
+        dir.removeRecursively();
+    }
 }
 
 
@@ -3599,96 +2836,92 @@ void Widget::on_plcbtn_clicked()
         return;
     }
 
-    // 🔥 检查预设框状态
-    if (hasValidBoxes) {
-        qDebug() << "检测到预设框，将使用保存的框坐标";
-        qDebug() << "检测框:" << savedDetectionBox.x << savedDetectionBox.y
-                 << savedDetectionBox.width << savedDetectionBox.height;
-        qDebug() << "跟踪框:" << savedTrackingBox.x << savedTrackingBox.y
-                 << savedTrackingBox.width << savedTrackingBox.height;
-    } else {
-        qDebug() << "未检测到预设框，将使用手动选框模式";
+    // ==========================================================
+    // 核心改进：直接从 UI (ImageLabel) 获取单一识别框，彻底告别 OpenCV 弹窗
+    // ==========================================================
+    QRect uiRect = imageLabel->getSelectionRect();
+    if (!uiRect.isNull() && uiRect.width() > 0 && uiRect.height() > 0) {
+
+        // 尝试获取当前相机的物理分辨率
+        unsigned int camWidth = 0, camHeight = 0;
+        if (m_pcMyCamera) {
+            MVCC_INTVALUE_EX stWidth = {0};
+            MVCC_INTVALUE_EX stHeight = {0};
+
+            // 获取宽度结构体数据，并提取当前值
+            if (m_pcMyCamera->GetIntValue("Width", &stWidth) == MV_OK) {
+                camWidth = stWidth.nCurValue;
+            }
+            // 获取高度结构体数据，并提取当前值
+            if (m_pcMyCamera->GetIntValue("Height", &stHeight) == MV_OK) {
+                camHeight = stHeight.nCurValue;
+            }
+        }
+        // 兜底策略：使用全局 myImage 的分辨率
+        if (camWidth == 0 && myImage && !myImage->empty()) {
+            camWidth = myImage->cols;
+            camHeight = myImage->rows;
+        }
+
+        if (camWidth > 0 && camHeight > 0) {
+            // 计算由于 Qt::KeepAspectRatio 引起的画面留白偏移
+            QSize originalSize(camWidth, camHeight);
+            QSize labelSize = imageLabel->size();
+            QSize scaledSize = originalSize.scaled(labelSize, Qt::KeepAspectRatio);
+
+            int xOffset = (labelSize.width() - scaledSize.width()) / 2;
+            int yOffset = (labelSize.height() - scaledSize.height()) / 2;
+
+            // 去除留白，得到相对于实际图像的纯净坐标
+            double realX = uiRect.x() - xOffset;
+            double realY = uiRect.y() - yOffset;
+
+            // 计算缩放比
+            double xRatio = static_cast<double>(camWidth) / scaledSize.width();
+            double yRatio = static_cast<double>(camHeight) / scaledSize.height();
+
+            // 映射到相机原始分辨率
+            cv::Rect2d physicalBox(
+                std::max(0.0, realX * xRatio),
+                std::max(0.0, realY * yRatio),
+                uiRect.width() * xRatio,
+                uiRect.height() * yRatio
+            );
+
+            // 越界保护
+            if (physicalBox.x + physicalBox.width > camWidth) physicalBox.width = camWidth - physicalBox.x;
+            if (physicalBox.y + physicalBox.height > camHeight) physicalBox.height = camHeight - physicalBox.y;
+
+            // 🔥【魔法所在】：将这唯一的框，同时赋值给追踪框和检测框！
+            savedDetectionBox = physicalBox;
+            savedTrackingBox = physicalBox;
+            hasValidBoxes = true;
+
+            qDebug() << "解析出物理识别框: " << savedDetectionBox.x << "," << savedDetectionBox.y
+                     << " w:" << savedDetectionBox.width << " h:" << savedDetectionBox.height;
+        }
     }
 
+    // 强校验：没画框就不让启动
+    if (!hasValidBoxes) {
+        QMessageBox::warning(this, "提示", "请先点击【软触发拍照】，并在画面上画出要识别的区域！");
+        return;
+    }
+
+    // ==========================================================
+    // 以下为原有启动线程逻辑，保持功能完整不丢失
+    // ==========================================================
     if (ui->checkBox->isChecked())
     {
-        // ========================================
-        // 执行原有的 plcbtn 逻辑（外部触发模式）
-        // ========================================
-
-        // 第一段核心逻辑：单次采集+图像处理
+        // 外部触发/间歇模式逻辑
         int exposureValue = ui->spinBox->value();
-        qDebug() << "SetExposureTime:" << exposureValue << m_pcMyCamera->SetFloatValue("ExposureTime", exposureValue);
+        m_pcMyCamera->SetFloatValue("ExposureTime", exposureValue);
 
-        std::unique_ptr<Mat> image = make_unique<Mat>();
-
-        try {
-            m_pcMyCamera->SetEnumValue("TriggerMode", 1);
-            m_pcMyCamera->SetEnumValue("TriggerSource", 7);
-        } catch (...) {
-            QMessageBox::warning(this, "警告", "相机配置失败！");
-            return;
-        }
-
-        int nRet = m_pcMyCamera->CommandExecute("TriggerSoftware");
-        if (MV_OK != nRet)
-        {
-            QMessageBox::warning(this, "警告", "软触发执行失败！");
-            return;
-        }
-
-        int waitTime = exposureValue / 1000 + 200;
-        QThread::msleep(waitTime);
-
-        *image = m_pcMyCamera->GetImage();
-        if (image->empty())
-        {
-            QMessageBox::warning(this, "警告", "未能获取有效图像！请检查相机连接。");
-            return;
-        }
-
-        // 图像旋转处理
-        int rotationIndex = ui->comboBox_2->currentIndex();
-        if (rotationIndex == 1)
-        {
-            cv::Mat rotatedImg;
-            cv::rotate(*image, rotatedImg, cv::ROTATE_90_CLOCKWISE);
-            *image = rotatedImg;
-            qDebug() << "Image rotated 90° clockwise";
-        }
-        else if (rotationIndex == 2)
-        {
-            cv::Mat rotatedImg;
-            cv::rotate(*image, rotatedImg, cv::ROTATE_90_COUNTERCLOCKWISE);
-            *image = rotatedImg;
-            qDebug() << "Image rotated 90° counter-clockwise";
-        }
-        else if (rotationIndex == 3)
-        {
-            cv::Mat rotatedImg;
-            cv::rotate(*image, rotatedImg, cv::ROTATE_180);
-            *image = rotatedImg;
-            qDebug() << "Image rotated 180°";
-        }
-
-//        // 检测模板图像是否为空
-//        if((ui->comboBox_4->currentIndex() == 0)||(ui->comboBox_4->currentIndex() == 1))
-//        {
-//            if (digitTemplates.empty()) {
-//                QMessageBox::warning(this, "警告", "模板图像为空！ 请确认目标字符");
-//                return;
-//            }
-//        }
-
-        if (isCollecting)
-        {
+        if (isCollecting) {
             QMessageBox::information(this, "提示", "已在采集中，若要停止请点击【取消识别】按钮");
             return;
         }
 
-        qDebug() << "Starting external trigger collection...";
-
-        // 清空UI显示
         j = 1;
         ui->image_undetected->clear();
         ui->imagenum->clear();
@@ -3699,288 +2932,113 @@ void Widget::on_plcbtn_clicked()
         totalImages = 0;
 
         // 重置相机状态
-        if (m_pcMyCamera)
-        {
+        if (m_pcMyCamera) {
             try {
-                qDebug() << "Resetting camera to clean state...";
-
                 m_pcMyCamera->StopGrabbing();
                 QThread::msleep(200);
-
                 m_pcMyCamera->SetEnumValue("TriggerMode", 1);
-                m_pcMyCamera->SetEnumValue("TriggerSource", 0);
+                m_pcMyCamera->SetEnumValue("TriggerSource", 0); // 硬触发
                 m_pcMyCamera->SetFloatValue("ExposureTime", exposureValue);
                 m_pcMyCamera->SetFloatValue("TriggerDelay", 0);
-
                 m_pcMyCamera->RegisterImageCallBack();
                 m_pcMyCamera->StartGrabbing();
                 QThread::msleep(100);
-
-                qDebug() << "✓ Camera reset and ready";
             } catch (...) {
-                QMessageBox::critical(this, "错误", "相机初始化失败！请重新打开相机。");
+                QMessageBox::critical(this, "错误", "相机初始化失败！");
                 return;
             }
         }
 
-        // 清理旧的cameraThread
-        if (cameraThread)
-        {
-            qDebug() << "Old cameraThread exists, cleaning up...";
-
-            if (cameraThread->isRunning())
-            {
+        // 清理并新建硬触发线程
+        if (cameraThread) {
+            if (cameraThread->isRunning()) {
                 cameraThread->requestStop();
-
-                try {
-                    cv::destroyAllWindows();
-                    cv::waitKey(1);
-                } catch (...) {}
-
-                if (!cameraThread->wait(3000))
-                {
-                    qDebug() << "WARNING: Old cameraThread timeout";
-                }
+                cameraThread->wait(1500);
             }
-
             disconnect(cameraThread, nullptr, this, nullptr);
             delete cameraThread;
-            cameraThread = nullptr;
-
-            QThread::msleep(200);
-            QCoreApplication::processEvents();
-            qDebug() << "✓ Old cameraThread cleaned up";
         }
 
-        // 创建新的cameraThread
-        qDebug() << "Creating new cameraThread...";
-            cameraThread = new CameraThread(this, m_pcMyCamera);
+        cameraThread = new CameraThread(this, m_pcMyCamera);
 
-            // 🔥 关键修改：如果有预设框，传递给cameraThread
-            if (hasValidBoxes) {
-                cameraThread->setPresetBoxes(savedDetectionBox, savedTrackingBox);
-                qDebug() << "预设框已传递给cameraThread";
-            } else {
-                cameraThread->clearPresetBoxes();
-                qDebug() << "cameraThread将使用手动选框模式";
+        // 🔥 将单框坐标传递给线程
+        if (hasValidBoxes) {
+            cameraThread->setPresetBoxes(savedDetectionBox, savedTrackingBox);
+        }
+
+        // 连接所有功能信号
+        connect(this, &Widget::rotate, cameraThread, &CameraThread::receiveangle1);
+        connect(this, &Widget::choosechannel,cameraThread,&CameraThread::receivecolorchannel);
+        connect(cameraThread, &CameraThread::signal_cleanlabel, this, &Widget::slot_clearResultLabel, Qt::QueuedConnection);
+        connect(cameraThread, &CameraThread::signal_messImage, this, [this](cv::Mat img) {
+            this->slot_displayAndDetect(&img);
+        }, Qt::QueuedConnection);
+        connect(cameraThread, &CameraThread::signal_boxesSelected, this, &Widget::slot_saveBoxesFromThread, Qt::QueuedConnection);
+        connect(cameraThread, &CameraThread::signal_sendForDetection, this, [this](cv::Mat img, Rect2d rect) {
+            if (!img.empty()) {
+                if (ui->comboBox_4->currentIndex() == 2) this->slot_readAndDetect(&img, rect);
+                else if (ui->comboBox_4->currentIndex() == 0) this->slot_readAndDetect3(&img, rect);
+                else if (ui->comboBox_4->currentIndex() == 1) this->slot_readAndDetect4(&img, rect);
             }
+        }, Qt::QueuedConnection);
 
-            // 连接信号槽
+        // 发送各项参数
+        emit rotate(ui->comboBox_2->currentIndex() == 1 ? 1 : (ui->comboBox_2->currentIndex() == 2 ? 2 : (ui->comboBox_2->currentIndex() == 3 ? 3 : 0)));
+        emit choosechannel(ui->comboBox_5->currentIndex() == 1 ? 1 : (ui->comboBox_5->currentIndex() == 2 ? 2 : (ui->comboBox_5->currentIndex() == 3 ? 3 : 0)));
+        emit sendDataTo(ui->lineEdit_4->text());
+        emit jiancestring(ui->dateEdit->toPlainText().toStdString());
 
-            connect(this, &Widget::rotate, cameraThread, &CameraThread::receiveangle1);
-            connect(this, &Widget::choosechannel,cameraThread,&CameraThread::receivecolorchannel);
-            connect(cameraThread, &CameraThread::signal_cleanlabel,
-                    this, &Widget::slot_clearResultLabel, Qt::QueuedConnection);
-            connect(cameraThread, &CameraThread::signal_messImage, this, [this](cv::Mat img) {
-                this->slot_displayAndDetect(&img);
-            }, Qt::QueuedConnection);
-            connect(cameraThread, &CameraThread::signal_boxesSelected,
-                    this, &Widget::slot_saveBoxesFromThread, Qt::QueuedConnection);
-            connect(cameraThread, &CameraThread::signal_sendForDetection, this, [this](cv::Mat img, Rect2d rect) {
-                if (!img.empty()) {
-                    if (ui->comboBox_4->currentIndex() == 2) {
-                        this->slot_readAndDetect(&img, rect);
-                    } else if (ui->comboBox_4->currentIndex() == 0) {
-                        this->slot_readAndDetect3(&img, rect);
-                    } else if (ui->comboBox_4->currentIndex() == 1) {
-                        this->slot_readAndDetect4(&img, rect);
-                    }
-                }
-            }, Qt::QueuedConnection);
-        // 发送参数
-        int index = ui->comboBox_2->currentIndex();
-        switch (index)
-        {
-        case 1: angleValue = 1; break;
-        case 2: angleValue = 2; break;
-        case 3: angleValue = 3; break;
-        default: angleValue = 0;
-        }
-        emit rotate(angleValue);
+        emit caijianchicun(ui->lineEdit_5->text().toInt(), ui->lineEdit_9->text().toInt(), ui->lineEdit_10->text().toInt(), ui->lineEdit_11->text().toInt(), ui->lineEdit_13->text().toInt(), ui->lineEdit_18->text().toInt(), ui->lineEdit_19->text().toInt());
+        emit kernal(ui->lineEdit_15->text().toInt());
+        emit ssim(ui->lineEdit_yuzhi->text().toDouble());
 
-        int index1 = ui->comboBox_5->currentIndex();
-        switch (index1)
-        {
-        case 1:
-             colorchannel= 1;
-            break;
-        case 2:
-            colorchannel = 2;
-            break;
-        case 3:
-            colorchannel = 3;
-            break;
-        default:
-            colorchannel = 0;
-        }
-
-        emit choosechannel(colorchannel);
-
-        QString text = ui->lineEdit_4->text();
-        emit sendDataTo(text);
-
-        QString input = ui->dateEdit->toPlainText();
-        String targetstring1 = input.toStdString();
-        emit jiancestring(targetstring1);
-
-        // 图像处理参数
-        bool ok1;
-        int width_min = ui->lineEdit_5->text().toInt(&ok1);
-        int width_max = ui->lineEdit_9->text().toInt(&ok1);
-        int height_min = ui->lineEdit_10->text().toInt(&ok1);
-        int height_max = ui->lineEdit_11->text().toInt(&ok1);
-        int block_size1 = ui->lineEdit_13->text().toInt(&ok1);
-        int kernelsize = ui->lineEdit_15->text().toInt(&ok1);
-        int horizontalKernel = ui->lineEdit_18->text().toInt(&ok1);
-        int verticalKernel = ui->lineEdit_19->text().toInt(&ok1);
-
-        bool isParamValid = true;
-        if (block_size1 <= 1 || block_size1 % 2 != 1
-                || kernelsize <= 1 || kernelsize % 2 != 1
-                || horizontalKernel <= 1 || horizontalKernel % 2 != 1
-                || verticalKernel <= 1 || verticalKernel % 2 != 1) {
-            isParamValid = false;
-        }
-
-        if (!isParamValid) {
-            QMessageBox::warning(this, "参数错误", "图像处理参数必须均为大于1的奇数，请修正后重试！");
-            return;
-        }
-
-        emit caijianchicun(width_min, width_max, height_min, height_max, block_size1,
-                           horizontalKernel, verticalKernel);
-        emit kernal(kernelsize);
-
-        int number = ui->lineEdit_yuzhi->text().toDouble();
-        emit ssim(number);
-
-        // 启动线程
-        qDebug() << "Starting cameraThread...";
         cameraThread->start();
-
-        if (!cameraThread->wait(100))
-        {
-            qDebug() << "✓ CameraThread started successfully";
+        if (!cameraThread->wait(100)) {
             isCollecting = true;
-            QDir templateDir(currentTemplateDirPath);
-            QString lastFolderName = templateDir.dirName(); // 关键：提取路径的最后一级文件夹名
-
-            // 2. 拼接文本并设置到 statusLabel
-            QString statusText = QString("触发模式运行中\n产品模板：%1").arg(lastFolderName);
-            ui->statusLabel->setText(statusText);
-
+            ui->statusLabel->setText(QString("触发模式运行中\n产品模板：%1").arg(QDir(currentTemplateDirPath).dirName()));
             ui->plcbtn->setText("采集中...");
             ui->plcbtn->setEnabled(false);
             ui->VideoShoot->setEnabled(false);
             ui->pushButton_4->setEnabled(false);
-        }
-        else
-        {
-            qDebug() << "ERROR: CameraThread exited immediately";
-            QMessageBox::critical(this, "错误", "相机线程启动失败！");
+        } else {
             isCollecting = false;
-            ui->plcbtn->setText("触发采集");
-            ui->plcbtn->setEnabled(true);
         }
     }
     else
     {
-        // ========================================
-        // 执行 ReShoot 逻辑（软触发模式）
-        // ========================================
-
-        qDebug() << "=== Executing ReShoot logic ===";
-
+        // 软触发/连续模式逻辑
         int exposureValue = ui->spinBox->value();
         m_pcMyCamera->SetFloatValue("ExposureTime", exposureValue);
 
-//        if((ui->comboBox_4->currentIndex() == 0)||(ui->comboBox_4->currentIndex() == 1))
-//        {
-//            if (digitTemplates.empty()) {
-//                QMessageBox::warning(this, "警告", "模板图像为空! 请确认目标字符");
-//                return;
-//            }
-//        }
-
         ensureThreadsReady();
+        if (!myThread) reinitializeMyThread();
 
-                if (!myThread) {
-                    reinitializeMyThread();
-                }
-
-                // 🔥 关键修改：如果有预设框，传递给myThread
-                if (hasValidBoxes) {
-                    myThread->setPresetBoxes(savedDetectionBox, savedTrackingBox);
-                    qDebug() << "预设框已传递给myThread";
-                } else {
-                    myThread->clearPresetBoxes();
-                    qDebug() << "myThread将使用手动选框模式";
-                }
-                connect(myThread, &MyThread::signal_boxesSelected,
-                        this, &Widget::slot_saveBoxesFromThread, Qt::QueuedConnection);
-
-
-        // 设置参数
-        int number = ui->lineEdit_yuzhi->text().toDouble();
-        emit ssim(number);
-
-        int index = ui->comboBox_2->currentIndex();
-        switch (index) {
-        case 1: angleValue = 1; break;
-        case 2: angleValue = 2; break;
-        case 3: angleValue = 3; break;
-        default: angleValue = 0;
+        // 🔥 将单框坐标传递给线程
+        if (hasValidBoxes) {
+            myThread->setPresetBoxes(savedDetectionBox, savedTrackingBox);
         }
-        emit rotate(angleValue);
+        connect(myThread, &MyThread::signal_boxesSelected, this, &Widget::slot_saveBoxesFromThread, Qt::QueuedConnection);
 
-        int index1 = ui->comboBox_5->currentIndex();
-        switch (index1)
-        {
-        case 1:
-             colorchannel= 1;
-            break;
-        case 2:
-            colorchannel = 2;
-            break;
-        case 3:
-            colorchannel = 3;
-            break;
-        default:
-            colorchannel = 0;
-        }
+        // 发送参数
+        emit ssim(ui->lineEdit_yuzhi->text().toDouble());
+        emit rotate(ui->comboBox_2->currentIndex() == 1 ? 1 : (ui->comboBox_2->currentIndex() == 2 ? 2 : (ui->comboBox_2->currentIndex() == 3 ? 3 : 0)));
+        emit choosechannel(ui->comboBox_5->currentIndex() == 1 ? 1 : (ui->comboBox_5->currentIndex() == 2 ? 2 : (ui->comboBox_5->currentIndex() == 3 ? 3 : 0)));
+        emit sendDataTo(ui->lineEdit_4->text());
 
-        emit choosechannel(colorchannel);
-
-        QString text = ui->lineEdit_4->text();
-        emit sendDataTo(text);
-
-        m_pcMyCamera->SetEnumValue("TriggerSource", 7);
-
+        m_pcMyCamera->SetEnumValue("TriggerSource", 7); // 软触发
         myThread->getCameraPtr(m_pcMyCamera);
         myThread->getImagePtr(myImage);
 
         if (!myThread->isRunning()) {
             myThread->start();
-
-       // 1. 解析 currentTemplateDirPath，获取最后一级文件夹名称
-        QDir templateDir(currentTemplateDirPath);
-        QString lastFolderName = templateDir.dirName(); // 关键：提取路径的最后一级文件夹名
-
-        // 2. 拼接文本并设置到 statusLabel
-        QString statusText = QString("软触发模式运行中\n产品模板：%1").arg(lastFolderName);
-        ui->statusLabel->setText(statusText);
-
-        ui->plcbtn->setEnabled(false);
-        ui->VideoShoot->setEnabled(false);
-        ui->pushButton_4->setEnabled(false);
-
-        qDebug() << "=== ReShoot logic completed ===";
+            ui->statusLabel->setText(QString("软触发模式运行中\n产品模板：%1").arg(QDir(currentTemplateDirPath).dirName()));
+            ui->plcbtn->setEnabled(false);
+            ui->VideoShoot->setEnabled(false);
+            ui->pushButton_4->setEnabled(false);
+        }
     }
-
     qDebug() << "=== on_plcbtn_clicked() COMPLETED ===";
 }
-}
-
 
 // 检测相机
 void Widget::on_HandwareDetect_clicked()

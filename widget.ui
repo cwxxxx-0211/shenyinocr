@@ -879,7 +879,7 @@
                <x>0</x>
                <y>0</y>
                <width>600</width>
-               <height>361</height>
+               <height>355</height>
               </rect>
              </property>
              <property name="styleSheet">
@@ -1000,8 +1000,8 @@
               <rect>
                <x>0</x>
                <y>0</y>
-               <width>586</width>
-               <height>1082</height>
+               <width>583</width>
+               <height>1091</height>
               </rect>
              </property>
              <property name="styleSheet">
@@ -1591,8 +1591,8 @@
               <rect>
                <x>0</x>
                <y>0</y>
-               <width>586</width>
-               <height>717</height>
+               <width>583</width>
+               <height>723</height>
               </rect>
              </property>
              <property name="styleSheet">
