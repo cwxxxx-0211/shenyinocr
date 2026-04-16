@@ -875,9 +875,21 @@ void Widget::slot_displayAndDetect(cv::Mat *image)
  */
 
 //原始图像版
+/**
+ * @brief OCR识别检测槽函数 (带呼吸边距优化版)
+ * @param image 输入图像指针
+ * @param diffbox 检测区域
+ * @details 使用PaddleOCR进行文字识别，支持中英文、数字识别
+ */
+
+/**
+ * @brief OCR识别检测槽函数 (极致简化版：去白边、去界面画框显示)
+ * @param image 输入图像指针
+ * @param diffbox 检测区域
+ */
 void Widget::slot_readAndDetect(cv::Mat *image, Rect2d diffbox)
 {
-    // Check delayed removal queue
+    // 1. 检查延迟剔除队列
     if (!removalQueue.empty() && totalImages >= removalQueue.front().second - 1)
     {
         qDebug() << "[PLC_LOG] Triggering delayed wrongremove, wrongindex:" << wrongindex;
@@ -895,12 +907,9 @@ void Widget::slot_readAndDetect(cv::Mat *image, Rect2d diffbox)
     }
 
     cv::Mat croppedImage;
-    QRect detRect(0, 0, 0, 0);
-    cv::Rect detRect1(0, 0, 0, 0);
+    // 注：detRect 和 detRect1 相关的 UI 变量已不再需要
 
-    // 1:Red, 2:Green, 3:Blue
-    imageLabel->setColor(color);
-
+    // 按周期清理数据，不再清理 imageLabel 的矩形，因为不再绘制
     if (judge)
     {
         j = 1;
@@ -909,30 +918,30 @@ void Widget::slot_readAndDetect(cv::Mat *image, Rect2d diffbox)
     }
     if ((j - 1) % x == 0)
     {
-        imageLabel->clearGreenRects();
+        // imageLabel->clearGreenRects(); // 去掉框显示，不再需要清理
         detectedRects.clear();
         string1.clear();
     }
 
-    // ================== LOGGING & MEMORY SAFETY COPY START ==================
+    // ================== 1. 精准抠图 (不带白边) ==================
     qDebug() << "----------------- OCR PROCESS START -----------------";
     cv::Mat safeImage = image->clone();
-    cv::Rect rawSelectionRect(
+
+    cv::Rect roi = cv::Rect(
                 static_cast<int>(diffbox.x),
                 static_cast<int>(diffbox.y),
                 static_cast<int>(diffbox.width),
-                static_cast<int>(diffbox.height));
+                static_cast<int>(diffbox.height)) & cv::Rect(0, 0, safeImage.cols, safeImage.rows);
 
-    cv::Rect roi = rawSelectionRect & cv::Rect(0, 0, safeImage.cols, safeImage.rows);
     if (roi.width <= 0 || roi.height <= 0)
     {
-        qDebug() << "[OCR_ERROR] Invalid selection area! Out of original image bounds.";
+        qDebug() << "[OCR_ERROR] Invalid selection area!";
         return;
     }
 
     croppedImage = safeImage(roi).clone();
 
-    // Uniform image type
+    // 统一图像类型
     if (croppedImage.type() != CV_8UC3)
     {
         cv::Mat temp;
@@ -940,116 +949,64 @@ void Widget::slot_readAndDetect(cv::Mat *image, Rect2d diffbox)
         croppedImage = temp;
     }
 
-    qDebug() << "[OCR_LOG] Cropped ROI size:" << croppedImage.cols << "x" << croppedImage.rows;
-    \
-    QString debugName = QDir::currentPath() + "/debug_roi_" + QDateTime::currentDateTime().toString("HHmmss_zzz") + ".jpg";
-    cv::imwrite(debugName.toLocal8Bit().toStdString(), croppedImage);
-    qDebug() << "[OCR_LOG] save image to" << debugName;
-
+    // ================== 2. 执行 OCR 识别 (原生 Run API) ==================
     QString target_qstring = setdatetime();
     std::string target_string = target_qstring.toStdString();
     ui->imagenum->setText(QString::number(totalImages));
 
-    // OCR Detection
-        std::vector<std::vector<std::vector<int>>> boxes;
-        det->Run(croppedImage, boxes);
-        qDebug() << "[OCR_LOG] DBNet detected text boxes count:" << boxes.size();
+    std::vector<std::vector<std::vector<int>>> boxes;
+    det->Run(croppedImage, boxes);
 
-        // ======= 删掉所有的 if(!boxes.empty()) 拦截，恢复无条件识别 =======
-        vector<std::pair<std::string, cv::Rect>> str_res;
-        str_res = rec->RunOCR(boxes, croppedImage, cls);
-        qDebug() << "[OCR_LOG] CRNN recognition results count:" << str_res.size();
-        // ================================================================
+    // 使用原生 Run 函数确保识别率与 MainWindow 一致
+    std::vector<std::string> raw_str_res;
+    rec->Run(boxes, croppedImage, cls, raw_str_res);
 
-        // Sort by Y coordinate
-        std::sort(str_res.begin(), str_res.end(), [](const auto &a, const auto &b)
-        {
-            return a.second.y < b.second.y;
-        });
+    // 只需要提取字符串，不需要再计算坐标 Rect 映射到 UI 了
+    std::vector<std::string> sorted_res = raw_str_res;
+    // 如果有多行文字，可以根据 boxes 里的 y 坐标对 raw_str_res 进行排序，
+    // 这里为了简洁，假设识别顺序正常，直接处理结果。
 
-    // Clear previous results
     allResults.clear();
-    detectedRects.clear();
 
-    // Process OCR results
-    for (size_t i = 0; i < str_res.size(); i++)
+    // ================== 3. 结果清洗与拼接 ==================
+    for (size_t i = 0; i < sorted_res.size(); i++)
     {
-        auto &res = str_res[i];
-        QString rawText = QString::fromStdString(res.first);
-        qDebug() << "[OCR_RESULT] Raw OCR text (" << i << "):" << rawText;
+        std::string res_str = sorted_res[i];
 
-        // Clean text - ALLOWING HYPHENS NOW
-        res.first.erase(std::remove_if(res.first.begin(), res.first.end(), [this](char c)
+        // 过滤字符
+        res_str.erase(std::remove_if(res_str.begin(), res_str.end(), [this](char c)
         {
-            return !(isAlnumOrChinese(c) || c == '-');
-        }), res.first.end());
+            return !(isAlnumOrChinese(c) || c == '-' || c == '.' || c == ':');
+        }), res_str.end());
 
-        qDebug() << "[OCR_RESULT] Cleaned OCR text (" << i << "):" << QString::fromStdString(res.first);
+        if (res_str.empty()) continue;
 
-        // Concatenate result text
-        if (i < str_res.size() - 1)
-        {
-            allResults += res.first + '\n';
-        }
-        else
-        {
-            allResults += res.first;
-        }
-
-        // Map coordinates back to original image
-        detRect1.x = res.second.x + roi.x;
-        detRect1.y = res.second.y + roi.y;
-        detRect1.width = res.second.width;
-        detRect1.height = res.second.height;
-
-        // Convert to UI coordinates for drawing
-        double uiScaleX = static_cast<double>(imageLabel->width()) / image->cols;
-        double uiScaleY = static_cast<double>(imageLabel->height()) / image->rows;
-        detRect.setX(static_cast<int>(detRect1.x * uiScaleX));
-        detRect.setY(static_cast<int>(detRect1.y * uiScaleY));
-        detRect.setWidth(static_cast<int>(detRect1.width * uiScaleX));
-        detRect.setHeight(static_cast<int>(detRect1.height * uiScaleY));
-        detectedRects.push_back(detRect);
+        if (!allResults.empty()) allResults += '\n';
+        allResults += res_str;
     }
 
-    // Display OCR results
+    // ================== 4. UI 文本更新与 PLC 判定 ==================
     ui->resultlabel_7->setText(QString::fromStdString(allResults));
     ui->resultlabel_7->setWordWrap(true);
-    QFont font = ui->resultlabel_7->font();
-    font.setPointSize(16);
-    ui->resultlabel_7->setFont(font);
 
-    // Draw detection boxes
-    for (const auto &rect : detectedRects)
-    {
-        imageLabel->addSelectionRect(rect, 2);
-    }
-    imageLabel->update();
+    // 🔥 此处删掉了 imageLabel->addSelectionRect 和 imageLabel->update()
+    // 界面上不会再出现任何检测框
 
-    qDebug() << "[OCR_LOG] Final concatenated result:" << QString::fromStdString(allResults);
-    qDebug() << "[OCR_LOG] Target comparison string:" << target_qstring;
+    qDebug() << "[OCR_LOG] Final String:" << QString::fromStdString(allResults);
 
-    // Recognition result judgment and subsequent logic
+    // PLC 判定及存图逻辑
     if (j % x == 0)
     {
         if (allResults.empty())
         {
             if ((ui->comboBox->currentIndex() == 1) || (ui->comboBox->currentIndex() == 3))
-            {
-                QString saveDir = selectedDir + "/ng/";
-                saveImage2Async("jpg", saveDir);
-            }
+                saveImage2Async("jpg", selectedDir + "/ng/");
+
             ngImages++;
             totalImages++;
             ui->resultlabel->setText(QString("<font size='10' color='red'>错误！</font>"));
-            if (wrongindex == 0)
-            {
-                wrongremove();
-            }
-            else
-            {
-                removalQueue.push(std::make_pair(totalImages, totalImages + wrongindex));
-            }
+            if (wrongindex == 0) wrongremove();
+            else removalQueue.push(std::make_pair(totalImages, totalImages + wrongindex));
         }
         else
         {
@@ -1057,50 +1014,36 @@ void Widget::slot_readAndDetect(cv::Mat *image, Rect2d diffbox)
             {
                 totalImages++;
                 if ((ui->comboBox->currentIndex() == 2) || (ui->comboBox->currentIndex() == 3))
-                {
-                    QString saveDir = selectedDir + "/ok/";
-                    saveImage2Async("jpg", saveDir);
-                }
+                    saveImage2Async("jpg", selectedDir + "/ok/");
+
                 ui->resultlabel->setText(QString("<font size='10' color='SpringGreen'>正确！</font><br>"));
                 rightremove();
             }
             else
             {
                 if ((ui->comboBox->currentIndex() == 1) || (ui->comboBox->currentIndex() == 3))
-                {
-                    QString saveDir = selectedDir + "/ng/";
-                    saveImage2Async("jpg", saveDir);
-                }
+                    saveImage2Async("jpg", selectedDir + "/ng/");
+
                 ngImages++;
                 totalImages++;
                 ui->resultlabel->setText(QString("<font size='10' color='red'>错误！</font>"));
-                if (wrongindex == 0)
-                {
-                    wrongremove();
-                }
-                else
-                {
-                    removalQueue.push(std::make_pair(totalImages, totalImages + wrongindex));
-                }
+                if (wrongindex == 0) wrongremove();
+                else removalQueue.push(std::make_pair(totalImages, totalImages + wrongindex));
             }
         }
     }
 
-    // Update statistics
-    double hegerate = (1 - static_cast<double>(ngImages) / totalImages) * 100;
-    QString str1 = QString::number(hegerate, 'f', 1);
-    ui->lineBoxIndex_6->setText(str1);
+    // 更新统计
+    double hegerate = (totalImages > 0) ? (1 - static_cast<double>(ngImages) / totalImages) * 100 : 0.0;
+    ui->lineBoxIndex_6->setText(QString::number(hegerate, 'f', 1));
     ui->ngnum->setText(QString("%1").arg(ngImages));
     ui->imagenum->setText(QString("%1").arg(totalImages));
 
-    // Display detection time
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
     ui->speedLabel->setText(QString("检测耗时 %1 毫秒").arg(duration));
 
-    qDebug() << "[OCR_LOG] Total processing time:" << duration << "ms";
     qDebug() << "----------------- OCR PROCESS END -----------------";
-
     j++;
 }
 
@@ -1495,7 +1438,7 @@ void Widget::on_VideoShoot_clicked()
     slot_displayAndDetect(myImage);
 
     // 注意：这里我们只拍照显示，不强制运行识别。用户可以在这张图上画框。
-    ui->statusLabel->setText("单词采集完成，请在图上画框并点击保存模板");
+    ui->statusLabel->setText("单次采集完成，请在图上画框并点击保存模板");
 }
 /**
  * @brief 连续拍照按钮点击槽函数
@@ -2066,89 +2009,93 @@ void Widget::on_textsure_btn_clicked()
             QMessageBox::information(this, "提示", "请先选择模板文件夹");
             return;
         }
-    }
-
-    // 2. 读取当前修改后的目标字符
-    QString newMubiaozifu = ui->dateEdit->toPlainText();
-    if (newMubiaozifu.isEmpty()) {
-        digitTemplates.clear();
-        QMessageBox::information(this, "提示", "目标字符为空，已清空模板");
-        return;
-    }
-
-    // ================== 修复 1：升级正则表达式，加入中文支持 ==================
-    QStringList baseNamesToFind;
-    // 升级正则表达式：允许 [数字、字母、中文] 后面跟带括号的数字作为一个整体
-    QRegularExpression regex(R"(([\d[A-Za-z\x{4e00}-\x{9fa5}]\(\d+\))|(\d)|([A-Za-z])|([\x{4e00}-\x{9fa5}]))");
-    QRegularExpressionMatchIterator matchIt = regex.globalMatch(newMubiaozifu);
-
-    while (matchIt.hasNext()) {
-        QRegularExpressionMatch match = matchIt.next();
-        QString unit;
-        if (!match.captured(1).isEmpty()) unit = match.captured(1);
-        else if (!match.captured(2).isEmpty()) unit = match.captured(2);
-        else if (!match.captured(3).isEmpty()) unit = match.captured(3);
-        else if (!match.captured(4).isEmpty()) unit = match.captured(4); // 提取到中文字符
-
-        baseNamesToFind.append(unit.toLower());
-    }
-
-    // ================== 修复 2：无视后缀名，建立基础名映射 ==================
-    QDir directory(currentTemplateDirPath);
-    QMap<QString, QString> filePathMap;
-    static const QStringList filters = {"*.jpg", "*.jpeg", "*.png", "*.bmp", "*.tiff"};
-
-    QFileInfoList fileList = directory.entryInfoList(
-                filters,
-                QDir::Files | QDir::NoDotAndDotDot);
-
-    for (const QFileInfo &fileInfo : fileList) {
-        QString baseName = fileInfo.completeBaseName().toLower();
-        if (!filePathMap.contains(baseName)) {
-            filePathMap.insert(baseName, fileInfo.absoluteFilePath());
+        // 2. 读取当前修改后的目标字符
+        QString newMubiaozifu = ui->dateEdit->toPlainText();
+        if (newMubiaozifu.isEmpty()) {
+            digitTemplates.clear();
+            QMessageBox::information(this, "提示", "目标字符为空，已清空模板");
+            return;
         }
-    }
 
-    // ================== 修复 3：使用内存流解码解决中文路径 BUG ==================
-    std::vector<cv::Mat> tempTemplates;
-    bool hasMissing = false;
-    QString missingNames;
+        // ================== 修复 1：升级正则表达式，加入中文支持 ==================
+        QStringList baseNamesToFind;
+        // 升级正则表达式：允许 [数字、字母、中文] 后面跟带括号的数字作为一个整体
+        QRegularExpression regex(R"(([\d[A-Za-z\x{4e00}-\x{9fa5}]\(\d+\))|(\d)|([A-Za-z])|([\x{4e00}-\x{9fa5}]))");
+        QRegularExpressionMatchIterator matchIt = regex.globalMatch(newMubiaozifu);
 
-    for (const QString &searchKey : baseNamesToFind) {
-        if (filePathMap.contains(searchKey)) {
-            QFile file(filePathMap[searchKey]);
-            if (file.open(QIODevice::ReadOnly)) {
-                QByteArray data = file.readAll();
-                std::vector<uchar> buf(data.begin(), data.end());
-                cv::Mat templateImg = cv::imdecode(buf, cv::IMREAD_GRAYSCALE);
+        while (matchIt.hasNext()) {
+            QRegularExpressionMatch match = matchIt.next();
+            QString unit;
+            if (!match.captured(1).isEmpty()) unit = match.captured(1);
+            else if (!match.captured(2).isEmpty()) unit = match.captured(2);
+            else if (!match.captured(3).isEmpty()) unit = match.captured(3);
+            else if (!match.captured(4).isEmpty()) unit = match.captured(4); // 提取到中文字符
 
-                if (templateImg.empty()) {
-                    hasMissing = true;
-                    missingNames += searchKey + "(读取损坏) ";
+            baseNamesToFind.append(unit.toLower());
+        }
+
+        // ================== 修复 2：无视后缀名，建立基础名映射 ==================
+        QDir directory(currentTemplateDirPath);
+        QMap<QString, QString> filePathMap;
+        static const QStringList filters = {"*.jpg", "*.jpeg", "*.png", "*.bmp", "*.tiff"};
+
+        QFileInfoList fileList = directory.entryInfoList(
+                    filters,
+                    QDir::Files | QDir::NoDotAndDotDot);
+
+        for (const QFileInfo &fileInfo : fileList) {
+            QString baseName = fileInfo.completeBaseName().toLower();
+            if (!filePathMap.contains(baseName)) {
+                filePathMap.insert(baseName, fileInfo.absoluteFilePath());
+            }
+        }
+
+        // ================== 修复 3：使用内存流解码解决中文路径 BUG ==================
+        std::vector<cv::Mat> tempTemplates;
+        bool hasMissing = false;
+        QString missingNames;
+
+        for (const QString &searchKey : baseNamesToFind) {
+            if (filePathMap.contains(searchKey)) {
+                QFile file(filePathMap[searchKey]);
+                if (file.open(QIODevice::ReadOnly)) {
+                    QByteArray data = file.readAll();
+                    std::vector<uchar> buf(data.begin(), data.end());
+                    cv::Mat templateImg = cv::imdecode(buf, cv::IMREAD_GRAYSCALE);
+
+                    if (templateImg.empty()) {
+                        hasMissing = true;
+                        missingNames += searchKey + "(读取损坏) ";
+                    } else {
+                        tempTemplates.push_back(templateImg);
+                    }
                 } else {
-                    tempTemplates.push_back(templateImg);
+                    hasMissing = true;
+                    missingNames += searchKey + "(无法打开) ";
                 }
             } else {
                 hasMissing = true;
-                missingNames += searchKey + "(无法打开) ";
+                missingNames += searchKey + " ";
             }
-        } else {
-            hasMissing = true;
-            missingNames += searchKey + " ";
         }
+
+        // ================== 修复 4：友好的报警和隔离机制 ==================
+        if (hasMissing) {
+            // 如果有任何图片读取失败或丢失，绝不更新到全局的 digitTemplates，同时给出严厉警告
+            QMessageBox::critical(this, "严重警告",
+                "以下字符未在文件夹中找到对应图片，或图片读取失败：\n[ " + missingNames + " ]\n\n请检查模板文件夹内的图片是否存在或是否损坏（支持中文，无需关心后缀和大小写）！\n本次更新已撤销。");
+            return;
+        }
+
+        // 5. 全部成功后，再更新到全局容器
+        digitTemplates = tempTemplates;
+        QMessageBox::information(this, "提示", "目标字符确认成功，共加载 " + QString::number(digitTemplates.size()) + " 个模板！");
+    }
+    else{
+     QMessageBox::information(this, "提示", "目标字符确认成功 ");
     }
 
-    // ================== 修复 4：友好的报警和隔离机制 ==================
-    if (hasMissing) {
-        // 如果有任何图片读取失败或丢失，绝不更新到全局的 digitTemplates，同时给出严厉警告
-        QMessageBox::critical(this, "严重警告",
-            "以下字符未在文件夹中找到对应图片，或图片读取失败：\n[ " + missingNames + " ]\n\n请检查模板文件夹内的图片是否存在或是否损坏（支持中文，无需关心后缀和大小写）！\n本次更新已撤销。");
-        return;
-    }
 
-    // 5. 全部成功后，再更新到全局容器
-    digitTemplates = tempTemplates;
-    QMessageBox::information(this, "提示", "目标字符确认成功，共加载 " + QString::number(digitTemplates.size()) + " 个模板！");
 }
 
 
