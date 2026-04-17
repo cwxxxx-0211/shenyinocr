@@ -45,6 +45,7 @@ CONFIG(release, debug|release) {
 
 SOURCES += \
     CameraThread.cpp \
+    Detector.cpp \
     ImageManipulator.cpp \
     PaddleOCR/src/clipper.cpp \
     PaddleOCR/src/config.cpp \
@@ -67,6 +68,7 @@ SOURCES += \
 HEADERS += \
     CameraThread.h \
     CryptoUtils.h \
+    Detector.h \
     PaddleOCR/include/clipper.h \
     PaddleOCR/include/config.h \
     PaddleOCR/include/ocr_cls.h \

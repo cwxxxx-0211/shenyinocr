@@ -208,7 +208,7 @@
             </size>
            </property>
            <property name="text">
-            <string>单次识别</string>
+            <string>制作模板</string>
            </property>
            <property name="icon">
             <iconset resource="image/image.qrc">
@@ -1590,7 +1590,7 @@
              <property name="geometry">
               <rect>
                <x>0</x>
-               <y>0</y>
+               <y>-361</y>
                <width>583</width>
                <height>723</height>
               </rect>
@@ -1923,7 +1923,7 @@
                     </size>
                    </property>
                    <property name="text">
-                    <string>100</string>
+                    <string>300</string>
                    </property>
                   </widget>
                  </item>

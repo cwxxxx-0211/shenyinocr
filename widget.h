@@ -68,6 +68,7 @@
 #include <utility> // for std::pair
 #include <queue>
 #include <templatematch.h>
+#include <Detector.h>
 
 using namespace cv;
 using namespace PaddleOCR;
@@ -244,6 +245,8 @@ private:
     Mat *muban;                         ///< 模板图像
     Mat *frame;                         ///< 帧图像
     QImage *QmyImage = NULL;            ///< Qt图像对象
+    OverlapDetector overlapDetector;  ///< 防重叠检测引擎实例
+
 
     // ========== 参数设置 ==========
     QString datatime;                   ///< 日期时间
@@ -263,6 +266,7 @@ private:
     // ========== 设置和UI ==========
     QMap<QString, bool> settings;       ///< 设置映射
     QPointer<ImageLabel> imageLabel;    ///< 图像标签指针
+    void initOverlapDetectorFromCurrentDir(); ///< 从当前模板文件夹加载防重叠配置
 
     // ========== 图像处理相关 ==========
     cv::Mat croppedImage;               ///< 裁剪图像

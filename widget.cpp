@@ -67,6 +67,160 @@ using namespace std;
 // OpenCV全局变量
 cv::Point pt1, pt2;
 
+// ==========================================
+// 防重叠标定辅助功能 (精简版：去除了图像上的红色字体)
+// ==========================================
+struct PolygonUIState {
+    cv::Mat displayImg;
+    cv::Mat tempImg;
+    std::string windowName;
+    std::vector<cv::Point> points;
+};
+
+// ==========================================
+// 钢印多边形描点功能 (点击画点，按回车键完成)
+// ==========================================
+static void polyMouseCallback(int event, int x, int y, int flags, void* userdata) {
+    PolygonUIState* state = reinterpret_cast<PolygonUIState*>(userdata);
+    if (event == cv::EVENT_LBUTTONDOWN) {
+        state->points.push_back(cv::Point(x, y));
+        state->tempImg = state->displayImg.clone();
+        // 绘制已有的点和线
+        for (size_t i = 0; i < state->points.size(); ++i) {
+            cv::circle(state->tempImg, state->points[i], 3, cv::Scalar(0, 0, 255), -1);
+            if (i > 0) {
+                cv::line(state->tempImg, state->points[i - 1], state->points[i], cv::Scalar(0, 255, 0), 2);
+            }
+        }
+        cv::imshow(state->windowName, state->tempImg);
+    } else if (event == cv::EVENT_MOUSEMOVE && !state->points.empty()) {
+        // 鼠标悬停时的预览辅助线
+        cv::Mat hoverImg = state->tempImg.clone();
+        cv::line(hoverImg, state->points.back(), cv::Point(x, y), cv::Scalar(255, 0, 0), 1);
+        cv::imshow(state->windowName, hoverImg);
+    }
+}
+
+static std::vector<cv::Point> getPolygonROI(const cv::Mat& img, const std::string& windowTitle) {
+    cv::Mat displayImg = img.clone();
+    int screenHeightLimit = 800;
+    double scale = 1.0;
+    if (displayImg.rows > screenHeightLimit) {
+        scale = static_cast<double>(screenHeightLimit) / displayImg.rows;
+        cv::resize(displayImg, displayImg, cv::Size(), scale, scale);
+    }
+
+    PolygonUIState state;
+    state.displayImg = displayImg;
+    state.tempImg = displayImg.clone();
+    state.windowName = windowTitle;
+
+    cv::namedWindow(windowTitle);
+    cv::setMouseCallback(windowTitle, polyMouseCallback, &state);
+
+    while (true) {
+        cv::imshow(windowTitle, state.tempImg);
+        int key = cv::waitKey(10) & 0xFF;
+        if (key == 13) { // Enter回车键确认
+            if (state.points.size() >= 3) {
+                // 首尾闭合显示一下
+                cv::line(state.tempImg, state.points.back(), state.points.front(), cv::Scalar(0, 255, 0), 2);
+                cv::imshow(windowTitle, state.tempImg);
+                cv::waitKey(300);
+            }
+            break;
+        } else if (key == 27) { // ESC键取消
+            state.points.clear();
+            break;
+        }
+    }
+    cv::destroyWindow(windowTitle);
+
+    std::vector<cv::Point> finalPts;
+    for (auto& pt : state.points) {
+        finalPts.push_back(cv::Point(static_cast<int>(pt.x / scale), static_cast<int>(pt.y / scale)));
+    }
+    return finalPts;
+}
+
+
+// ==========================================
+// 快速矩形标定功能 (拖拽并松开鼠标即完成)
+// ==========================================
+struct QuickROIState {
+    cv::Mat displayImg;
+    cv::Mat tempImg;
+    std::string windowName;
+    cv::Rect roi;
+    cv::Point startPt;
+    bool isDrawing = false;
+    bool isDone = false;
+};
+
+static void quickMouseCallback(int event, int x, int y, int flags, void* userdata) {
+    QuickROIState* state = reinterpret_cast<QuickROIState*>(userdata);
+
+    if (event == cv::EVENT_LBUTTONDOWN) {
+        state->startPt = cv::Point(x, y);
+        state->isDrawing = true;
+        state->isDone = false;
+    }
+    else if (event == cv::EVENT_MOUSEMOVE && state->isDrawing) {
+        state->tempImg = state->displayImg.clone();
+        cv::rectangle(state->tempImg, state->startPt, cv::Point(x, y), cv::Scalar(0, 255, 0), 2);
+        cv::imshow(state->windowName, state->tempImg);
+    }
+    else if (event == cv::EVENT_LBUTTONUP) {
+        state->roi = cv::Rect(state->startPt, cv::Point(x, y));
+        // 处理反向拖拽的情况
+        if (state->roi.width < 0) { state->roi.x += state->roi.width; state->roi.width = std::abs(state->roi.width); }
+        if (state->roi.height < 0) { state->roi.y += state->roi.height; state->roi.height = std::abs(state->roi.height); }
+
+        state->isDrawing = false;
+        state->isDone = true; // 标记绘制完成
+    }
+}
+
+static cv::Rect getQuickRectROI(const cv::Mat& img, const std::string& windowTitle) {
+    cv::Mat displayImg = img.clone();
+    int screenHeightLimit = 800;
+    double scale = 1.0;
+    if (displayImg.rows > screenHeightLimit) {
+        scale = static_cast<double>(screenHeightLimit) / displayImg.rows;
+        cv::resize(displayImg, displayImg, cv::Size(), scale, scale);
+    }
+
+    QuickROIState state;
+    state.displayImg = displayImg;
+    state.tempImg = displayImg.clone();
+    state.windowName = windowTitle;
+
+    cv::namedWindow(windowTitle);
+    cv::setMouseCallback(windowTitle, quickMouseCallback, &state);
+
+    while (!state.isDone) {
+        cv::imshow(windowTitle, state.tempImg);
+        // 允许按 ESC 强行退出，或者等待 isDone 标记
+        int key = cv::waitKey(10) & 0xFF;
+        if (key == 27) break;
+    }
+
+    cv::destroyWindow(windowTitle);
+
+    // 坐标还原
+    cv::Rect finalRoi = state.roi;
+    finalRoi.x = static_cast<int>(finalRoi.x / scale);
+    finalRoi.y = static_cast<int>(finalRoi.y / scale);
+    finalRoi.width = static_cast<int>(finalRoi.width / scale);
+    finalRoi.height = static_cast<int>(finalRoi.height / scale);
+
+    return finalRoi;
+}
+
+
+
+
+
 struct CVDrawResult {
     cv::Rect rect;
     double score;
@@ -74,6 +228,10 @@ struct CVDrawResult {
 static std::vector<CVDrawResult> g_lastDrawResults;
 static cv::Rect g_lastRoi;
 static qint64 g_lastDetectTime = 0;
+
+// ============ 新增：用于绘制钢印的数据缓存 ============
+static std::vector<cv::Point> g_lastStampPoly; // 保存钢印的多边形坐标
+static bool g_lastStampIsOverlap = false;      // 记录钢印是否发生重叠
 
 /**
  * @brief Widget构造函数
@@ -806,86 +964,103 @@ void Widget::slot_displayAndDetect(cv::Mat *image)
         return;
     }
 
-    // 3. 核心重绘机制：只要在检测有效期内（2000毫秒），把识别结果强行画在图像上！
+    // 3. 核心重绘机制：有效期 2000 毫秒
     qint64 now = QDateTime::currentMSecsSinceEpoch();
-    if (now - g_lastDetectTime < 2000 && !g_lastDrawResults.empty()) {
+    if (now - g_lastDetectTime < 2000 ) {
 
-        // 动态计算自适应比例 (把字号调回 0.4，之前 0.2 太小了)
+        // 动态计算自适应比例（用于线宽和分数大小）
         double dynamicScale = std::max(1.0, displayImg.rows / 800.0);
         double fontScale = 0.4 * dynamicScale;
-
-        // 框和字的粗细
         int boxThickness = std::max(2, static_cast<int>(2 * dynamicScale));
         int textThickness = std::max(1, static_cast<int>(1.5 * dynamicScale));
 
+        // 🔥 此处已删除绘制 g_lastRoi 的 rectangle 语句，解决了多余大绿框的问题
+
+        // 绘制每一个字符的小绿框
         for (const auto& res : g_lastDrawResults) {
             cv::Rect rect = res.rect;
             rect.x += g_lastRoi.x; // 绝对坐标映射还原
             rect.y += g_lastRoi.y;
 
-            // 画绿框
             cv::rectangle(displayImg, rect, cv::Scalar(0, 255, 0), boxThickness);
 
-            // 分数大于等于0才显示数字
             if (res.score >= 0) {
                 std::string scoreText = std::to_string(static_cast<int>(res.score * 100));
                 int baseline = 0;
                 cv::Size textSize = cv::getTextSize(scoreText, cv::FONT_HERSHEY_SIMPLEX, fontScale, textThickness, &baseline);
 
-                // 文本位置：框的正上方中心对齐
                 cv::Point boxCenter(rect.x + rect.width / 2, rect.y);
-                int textX = boxCenter.x - textSize.width / 2;
-                int textY = boxCenter.y - 5; // 紧贴绿框上方
+                int textX = std::max(0, std::min(boxCenter.x - textSize.width / 2, displayImg.cols - textSize.width));
+                int textY = std::max(textSize.height, std::min(boxCenter.y - 5, displayImg.rows));
 
-                // 边界保护：防止字画出图片外面导致崩溃
-                textX = std::max(0, std::min(textX, displayImg.cols - textSize.width));
-                textY = std::max(textSize.height, std::min(textY, displayImg.rows));
-
-                // 🔥🔥🔥 核心魔法：文字描边（Outline），完美替代笨重的白色实心背景板
-                // 第一层：用纯黑加粗画底色（充当黑边轮廓，防止背景也是亮的导致看不清）
                 cv::putText(displayImg, scoreText, cv::Point(textX, textY),
                     cv::FONT_HERSHEY_SIMPLEX, fontScale, cv::Scalar(0, 0, 0), textThickness + 2);
-
-                // 第二层：用亮黄色（或者纯红色）画表层字体，极度清晰！
-                // cv::Scalar(0, 255, 255) 是亮黄色，cv::Scalar(0, 0, 255) 是纯红色
                 cv::putText(displayImg, scoreText, cv::Point(textX, textY),
                     cv::FONT_HERSHEY_SIMPLEX, fontScale, cv::Scalar(0, 255, 255), textThickness);
             }
         }
+
+        // ================== 🔥 绘制钢印多边形（改为黄色） ==================
+        if (!g_lastStampPoly.empty()) {
+            // 🔥 根据需求：将钢印框统一改为黄色 Scalar(0, 255, 255)
+            cv::Scalar stampColor = cv::Scalar(0, 255, 255);
+            // 如果您仍希望重叠时显红，可用这行替代：cv::Scalar stampColor = g_lastStampIsOverlap ? cv::Scalar(0, 0, 255) : cv::Scalar(0, 255, 255);
+
+            std::vector<std::vector<cv::Point>> polys = {g_lastStampPoly};
+            cv::polylines(displayImg, polys, true, stampColor, boxThickness);
+        }
     }
 
-// 4. OpenCV Mat 转 Qt QImage 显示
+    // 4. OpenCV Mat 转 Qt QImage 显示
     QImage img((const uchar *)displayImg.data, displayImg.cols, displayImg.rows, displayImg.step, QImage::Format_RGB888);
     img = img.rgbSwapped();
 
+    // ================== 🔥 使用 QPainter 绘制缩小后的中文标签 ==================
+    if (now - g_lastDetectTime < 2000) {
+        QPainter painter(&img);
+
+        // 🔥 将字号缩小：基础设定为 10，并根据图片高度自适应
+        int fontSize = static_cast<int>(10 * std::max(1.0, img.height() / 800.0));
+        painter.setFont(QFont("Microsoft YaHei", fontSize, QFont::Bold));
+
+        // 1. 在生产日期框位置（即 g_lastRoi）左上方画“日期”
+        if (g_lastRoi.width > 0) {
+            painter.setPen(Qt::green);
+            painter.drawText(QPoint(g_lastRoi.x, g_lastRoi.y), "日期");
+        }
+
+        // 2. 在钢印多边形左上方画“钢印”
+        if (!g_lastStampPoly.empty()) {
+            painter.setPen(Qt::yellow); // 文字也设为黄色
+
+            // 找到多边形的最小坐标作为文字起点
+            int minX = img.width(), minY = img.height();
+            for(const auto& p : g_lastStampPoly) {
+                if(p.x < minX) minX = p.x;
+                if(p.y < minY) minY = p.y;
+            }
+            painter.drawText(QPoint(minX, minY - 5), "钢印");
+        }
+        painter.end();
+    }
+
+    // 5. 渲染到 UI
     QSize labelSize = ui->image_undetected->size();
     QPixmap pixmap = QPixmap::fromImage(img);
     QPixmap scaledPixmap = pixmap.scaled(labelSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
 
-    // 🔥 核心修复：强制关闭 UI 自带的畸变拉伸，保证我们算出来的居中留白(Offset)绝对准确！
     ui->image_undetected->setScaledContents(false);
     ui->image_undetected->setAlignment(Qt::AlignCenter);
     ui->image_undetected->setPixmap(scaledPixmap);
 }
+
+
+
 /**
  * @brief OCR识别检测槽函数
  * @param image 输入图像指针
  * @param diffbox 检测区域
  * @details 使用PaddleOCR进行文字识别，支持中英文、数字识别
- */
-
-//原始图像版
-/**
- * @brief OCR识别检测槽函数 (带呼吸边距优化版)
- * @param image 输入图像指针
- * @param diffbox 检测区域
- * @details 使用PaddleOCR进行文字识别，支持中英文、数字识别
- */
-
-/**
- * @brief OCR识别检测槽函数 (极致简化版：去白边、去界面画框显示)
- * @param image 输入图像指针
- * @param diffbox 检测区域
  */
 void Widget::slot_readAndDetect(cv::Mat *image, Rect2d diffbox)
 {
@@ -1048,7 +1223,7 @@ void Widget::slot_readAndDetect(cv::Mat *image, Rect2d diffbox)
 }
 
 /**
- * @brief 模板匹配检测槽函数
+ * @brief 钢印检测槽函数
  * @param image 输入图像指针
  * @param diffbox 检测区域
  * @details 使用SSIM算法进行模板相似度匹配
@@ -1057,16 +1232,10 @@ void Widget::slot_readAndDetect(cv::Mat *image, Rect2d diffbox)
 //原始图像版
 void Widget::slot_readAndDetect3(cv::Mat *image, Rect2d diffbox)
 {
-    if (digitTemplates.empty()) {
-        // 弹窗提示错误信息（父窗口为当前Widget，标题"错误"，内容说明问题）
-        QMessageBox::warning(this, "错误", "模板为空，无法进行模板匹配！");
-        return;  // 终止函数，不执行后续逻辑
-    }
-
-    // 检查延迟剔除队列
+    // ===================== 1. PLC 与 基础状态重置 =====================
     if (!removalQueue.empty() && totalImages >= removalQueue.front().second - 1)
     {
-        qDebug() << "wrongindex" << wrongindex;
+        qDebug() << "PLC延迟剔除触发，当前总数:" << totalImages;
         wrongremove();
         removalQueue.pop();
     }
@@ -1074,23 +1243,9 @@ void Widget::slot_readAndDetect3(cv::Mat *image, Rect2d diffbox)
     currentImagesSnapshot = totalImages;
     auto start = std::chrono::high_resolution_clock::now();
 
-    if (!image || image->empty())
-    {
-        qDebug() << "Error: Invalid input image.";
-        return;
-    }
+    if (!image || image->empty()) return;
 
-    cv::Mat croppedImage;
-
-    imageLabel->setColor(color);
-
-    if (judge)
-    {
-        j = 1;
-        x++;
-        judge = false;
-    }
-
+    if (judge) { j = 1; x++; judge = false; }
     if ((j - 1) % x == 0)
     {
         imageLabel->clearGreenRects();
@@ -1098,133 +1253,143 @@ void Widget::slot_readAndDetect3(cv::Mat *image, Rect2d diffbox)
         string1.clear();
     }
 
-    // ===================== 核心修改：完全基于原始图像坐标 =====================
-    // 1. 直接使用传入的diffbox作为原始图像上的选择区域（diffbox需是原始图像坐标）
-    // 转换Rect2d为cv::Rect（取整，因像素坐标为整数）
+    // ===================== 2. 字符数量与内容匹配 (原 readAndDetect4) =====================
+    int padding = 0;
     cv::Rect rawSelectionRect(
-                static_cast<int>(diffbox.x),
-                static_cast<int>(diffbox.y),
-                static_cast<int>(diffbox.width),
-                static_cast<int>(diffbox.height));
+        static_cast<int>(diffbox.x) - padding,
+        static_cast<int>(diffbox.y) - padding,
+        static_cast<int>(diffbox.width) + padding * 2,
+        static_cast<int>(diffbox.height) + padding * 2
+    );
 
-    // 2. 确保选择区域在原始图像范围内（避免越界）
-    if (rawSelectionRect.empty())
-    {
-        qDebug() << "Error: Empty selection area in raw image.";
-        return;
-    }
-    // 裁剪选择区域，确保不超出原始图像边界
     cv::Rect roi = rawSelectionRect & cv::Rect(0, 0, image->cols, image->rows);
-    if (roi.width <= 0 || roi.height <= 0)
-    {
-        QMessageBox::warning(this, "警告", "选择区域无效（超出原始图像范围）！");
+    if (roi.width <= 0 || roi.height <= 0) {
+        QMessageBox::warning(this, "警告", "识别区域超出原图范围！");
         return;
     }
 
-    // 3. 直接从原始图像裁剪ROI，生成croppedImage
-    croppedImage = (*image)(roi);
-    // =========================================================================
-
-    // 图像类型统一（与原逻辑一致）
-    if (croppedImage.type() != CV_8UC3)
-    {
+    cv::Mat croppedImage = (*image)(roi);
+    if (croppedImage.type() != CV_8UC3) {
         cv::Mat temp;
         cv::cvtColor(croppedImage, temp, cv::COLOR_GRAY2BGR);
         croppedImage = temp;
     }
 
-    // 发射裁剪后的图像信号（与原逻辑一致）
     emit imgshibie(&croppedImage);
-
-    // 更新图像计数显示（与原逻辑一致）
     ui->imagenum->setText(QString::number(totalImages));
 
-    // 执行模板匹配（与原逻辑一致）
-    QString text = ui->lineEdit_yuzhi->text();
-    int number = text.toInt();  // 修正：阈值应为整数，使用toInt更合理
-    int ssimvalue = 100 * templatematch->run1(digitTemplates);
-    ui->lineBoxIndex->setText(QString::number(ssimvalue));
+    // 解析目标字符
+    QString targetString = ui->dateEdit->toPlainText();
+    int targetNum = 0;
+    QRegularExpression regex(R"(([\d[A-Za-z\x{4e00}-\x{9fa5}]\(\d+\))|(\d)|([A-Za-z])|([\x{4e00}-\x{9fa5}]))");
+    QRegularExpressionMatchIterator matchIt = regex.globalMatch(targetString);
 
-    // 判断是否达到用户阈值（与原逻辑一致）
-    QString judgeResult = (ssimvalue > number ? "yes" : "no");  // 变量名修改，避免与全局judge冲突
+    while (matchIt.hasNext()) { matchIt.next(); targetNum++; }
+    if (targetNum == 0 && !targetString.isEmpty()) targetNum = targetString.length();
 
-    // ===================== 检测框绘制：基于原始图像坐标映射到UI =====================
-    // 清空旧检测框（补充逻辑：确保每次绘制的是当前ROI对应的框）
-    detectedRects.clear();
-    // 生成当前ROI在原始图像中的矩形框（用于UI绘制）
-    cv::Rect rawDetectRect = roi;  // 模板匹配的检测框即ROI区域本身
-    // 转换为UI坐标（仅用于显示，不影响核心逻辑）
-    double uiScaleX = static_cast<double>(imageLabel->width()) / image->cols;
-    double uiScaleY = static_cast<double>(imageLabel->height()) / image->rows;
-    QRect uiDetectRect(
-                static_cast<int>(rawDetectRect.x * uiScaleX),
-                static_cast<int>(rawDetectRect.y * uiScaleY),
-                static_cast<int>(rawDetectRect.width * uiScaleX),
-                static_cast<int>(rawDetectRect.height * uiScaleY)
-                );
-    detectedRects.push_back(uiDetectRect);
-    // =========================================================================
+    // 执行模板字符匹配
+    int detectNum = templatematch->run3(digitTemplates);
+    bool charIsOk = (detectNum == targetNum);
 
-    // 绘制检测框（与原逻辑一致）
-    for (const auto &rect : detectedRects)
-    {
-        imageLabel->addSelectionRect(rect, 2);
-    }
-    imageLabel->update();
+    // ===================== 3. 钢印防重叠检测 =====================
+        bool overlapIsOk = false;
+        g_lastStampPoly.clear(); // 每次检测前先清空上一帧的钢印数据
 
-    // 识别结果判定与后续逻辑（与原逻辑一致，修正变量名冲突）
-    if (j % x == 0)
-    {
-        if (judgeResult == "no")  // 使用修改后的变量名
-        {
-            if ((ui->comboBox->currentIndex() == 1) || (ui->comboBox->currentIndex() == 3))
-            {
-                QString saveDir = selectedDir + "/ng/";
-                saveImage2Async("jpg", saveDir);
+        if (!QFile::exists(currentTemplateDirPath + "/calibrate_config.yaml")) {
+            qDebug() << "[ERROR] Missing overlap config!";
+            overlapIsOk = false;
+        } else {
+            DetectResult overlapRes = overlapDetector.processImage(*image, diffbox);
+            overlapIsOk = overlapRes.isOk;
+
+            // 🔥 强化版控制台诊断输出
+            qDebug() << "============ Overlap Engine Diagnostics ============";
+            qDebug() << "Ring found? " << (overlapRes.foundRing ? "YES!" : "NO!");
+            qDebug() << "Max match score detected: " << overlapRes.valRing; // 无论成功失败，永远打印真实得分！
+            if (overlapRes.foundRing) {
+                qDebug() << "Overlap pixels: " << overlapRes.overlapPixels;
+            } else {
+                qDebug() << "WARNING: Ring not found. Cannot calculate stamp position.";
             }
+            qDebug() << "==================================================";
 
-            ngImages++;
-            totalImages++;
-            ui->resultlabel->setText(QString("<font size='10' color='red'>错误！</font>"));
+            g_lastStampPoly = overlapRes.finalStampPoly;
+            g_lastStampIsOverlap = !overlapIsOk;
+        }
 
-            if (wrongindex == 0)
+        // ===================== 4. UI 数据更新与画面重绘 =====================
+        g_lastDrawResults.clear();
+        for (const auto& match : templatematch->lastMatchResults) {
+            CVDrawResult res;
+            res.rect = std::get<0>(match);
+            res.score = std::get<1>(match);
+            g_lastDrawResults.push_back(res);
+        }
+
+        g_lastRoi = roi;
+        g_lastDetectTime = QDateTime::currentMSecsSinceEpoch();
+
+        detectedRects.clear();
+        // imageLabel->clearGreenRects(); // (由于你已经删除了 UI 控件画框逻辑，这行保留或删掉都可以)
+
+        // 触发画面刷新 (底层会将 字库框 和 钢印多边形 同时画在 UI 上)
+        slot_displayAndDetect(image);
+
+        // ===================== 5. 综合判定与 PLC 剔除输出 =====================
+        if (j % x == 0)
+        {
+            if (!charIsOk || !overlapIsOk)
             {
-                qDebug() << "wrongindex=0, calling wrongremove immediately";
-                wrongremove();
+                // NG 判定逻辑
+                if ((ui->comboBox->currentIndex() == 1) || (ui->comboBox->currentIndex() == 3)) {
+                    QString saveDir = selectedDir + "/ng/";
+                    saveImage2("png", saveDir);
+                }
+
+                ngImages++;
+                totalImages++;
+
+                // 🔥 核心修改：细分具体的错误输出提示
+                if (!charIsOk && overlapIsOk) {
+                    ui->resultlabel->setText(QString("<font size='10' color='red'>错误(喷码不合格)</font>"));
+                } else if (charIsOk && !overlapIsOk) {
+                    ui->resultlabel->setText(QString("<font size='10' color='red'>错误(钢印重叠)</font>"));
+                } else {
+                    ui->resultlabel->setText(QString("<font size='10' color='red'>错误(喷码与钢印均不合格)</font>"));
+                }
+
+                if (wrongindex == 0) {
+                    wrongremove();
+                } else {
+                    removalQueue.push(std::make_pair(totalImages, totalImages + wrongindex));
+                }
             }
             else
             {
-                qDebug() << "wrongindex=" << wrongindex << ", adding to queue for delayed removal";
-                removalQueue.push(std::make_pair(totalImages, totalImages + wrongindex));
+                // OK 判定逻辑
+                totalImages++;
+                if ((ui->comboBox->currentIndex() == 2) || (ui->comboBox->currentIndex() == 3)) {
+                    QString saveDir = selectedDir + "/ok/";
+                    saveImage2("png", saveDir);
+                }
+                ui->resultlabel->setText(QString("<font size='10' color='SpringGreen'>正确！</font><br>"));
+                rightremove();
             }
         }
-        else
-        {
-            totalImages++;
-            if ((ui->comboBox->currentIndex() == 2) || (ui->comboBox->currentIndex() == 3))
-            {
-                QString saveDir = selectedDir + "/ok/";
-                saveImage2Async("jpg", saveDir);
-            }
-            ui->resultlabel->setText(QString("<font size='10' color='SpringGreen'>正确！</font><br>"));
-            rightremove();
-        }
-    }
 
-    // 更新统计信息（与原逻辑一致）
-    double hegerate = (1 - static_cast<double>(ngImages) / totalImages) * 100;
-    QString str1 = QString::number(hegerate, 'f', 1);
-    ui->lineBoxIndex_6->setText(str1);
-    ui->ngnum->setText(QString("%1").arg(ngImages));
-    ui->imagenum->setText(QString("%1").arg(totalImages));
+    // 更新界面统计面板
+    double hegerate = (totalImages > 0) ? (1 - static_cast<double>(ngImages) / totalImages) * 100 : 0;
+    ui->lineBoxIndex_6->setText(QString::number(hegerate, 'f', 1));
+    ui->ngnum->setText(QString::number(ngImages));
+    ui->imagenum->setText(QString::number(totalImages));
 
-    // 显示检测耗时（与原逻辑一致）
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
     ui->speedLabel->setText(QString("检测耗时 %1 毫秒").arg(duration));
 
     j++;
 }
+
 
 
 /**
@@ -1270,7 +1435,7 @@ void Widget::slot_readAndDetect4(cv::Mat *image, Rect2d diffbox)
 
     // ===================== 坐标处理与 ROI 裁剪 (带鲁棒性优化) =====================
     // 核心改进：增加 20 像素的呼吸边距 (Padding)，防止框太小导致底层匹配失败
-    int padding = 20;
+    int padding = 0;
     cv::Rect rawSelectionRect(
         static_cast<int>(diffbox.x) - padding,
         static_cast<int>(diffbox.y) - padding,
@@ -2382,12 +2547,58 @@ void Widget::on_pushButton_5_clicked()
 
         // 保存对应的检测参数文件 (app_settings.appset) 以及物理框坐标
         saveSettingsToDir(savePath);
+        // ================== 🔥 修改后的标定逻辑 ==================
+        if (ui->comboBox_4->currentIndex() == 0) {
+            QMessageBox::information(this, "特征标定", "即将提取特征。\n操作提示：吸管口按住鼠标拖拽，钢印鼠标逐个点击并在画完后按【Enter回车键】结束。");
 
-        QMessageBox::information(this, "提示", "原图与检测参数已成功保存至：\n" + savePath);
+            cv::Mat calibImg = myImage->clone();
+
+            // 1. 获取吸管口 (仍保持原样，拖拽即刻完成)
+            std::string ringTitle = QString("第一步: 拖拽框选【吸管口】 (松开左键完成)").toLocal8Bit().toStdString();
+            cv::Rect ringRect = getQuickRectROI(calibImg, ringTitle);
+
+            if (ringRect.width > 5 && ringRect.height > 5) {
+                cv::Mat ringTpl = calibImg(ringRect).clone();
+                QString ringPath = savePath + "/template_ring.bmp";
+                cv::imwrite(ringPath.toLocal8Bit().toStdString(), ringTpl);
+
+                cv::Point2f cRing(ringRect.x + ringRect.width / 2.0f, ringRect.y + ringRect.height / 2.0f);
+
+                // 2. 获取钢印 (改为多边形描点，最后按回车键完成)
+                std::string stampTitle = QString("第二步: 左键依次点击绘制多边形【钢印区域】 (按Enter回车完成)").toLocal8Bit().toStdString();
+                std::vector<cv::Point> stampPts = getPolygonROI(calibImg, stampTitle);
+
+                if (stampPts.size() >= 3) {
+                    // 将多边形的各个顶点转换为相对坐标存入 vector
+                    std::vector<cv::Point2f> relStamp;
+                    for (const auto& pt : stampPts) {
+                        relStamp.push_back(cv::Point2f(pt.x - cRing.x, pt.y - cRing.y));
+                    }
+
+                    // 写入 YAML 参数
+                    QString yamlPath = savePath + "/calibrate_config.yaml";
+                    cv::FileStorage fs(yamlPath.toLocal8Bit().toStdString(), cv::FileStorage::WRITE);
+                    fs << "stamp_poly" << relStamp;
+                    fs.release();
+
+                    // 初始化引擎
+                    overlapDetector.init(ringPath.toLocal8Bit().toStdString(), yamlPath.toLocal8Bit().toStdString());
+                    QMessageBox::information(this, "保存成功", "特征标定与模板建档已全部完成！");
+                } else {
+                    QMessageBox::warning(this, "标定取消", "未选择有效的钢印区域 (需要至少点击三个点构成的多边形)。");
+                }
+            } else {
+                QMessageBox::warning(this, "标定取消", "未选择有效的吸管口区域。");
+            }
+        }
+
+ else {
+            QMessageBox::information(this, "提示", "原图与检测参数已成功保存至：\n" + savePath);
+        }
+        // ===============================================================
 
     } else {
         QMessageBox::critical(this, "错误", "图像文件保存失败！请检查系统路径权限。");
-        // 保存失败时清理空文件夹
         dir.removeRecursively();
     }
 }
@@ -2447,7 +2658,41 @@ void Widget::saveSettingsToDir(const QString &dirPath)
         settings.setValue("hasValidBoxes", false);
     }
 }
+void Widget::initOverlapDetectorFromCurrentDir() {
+    if (currentTemplateDirPath.isEmpty()) {
+        qDebug() << "[DEBUG] currentTemplateDirPath is EMPTY. Skipping engine init.";
+        return;
+    }
 
+    // 1. 定义文件路径
+    QString ringPath = currentTemplateDirPath + "/template_ring.bmp";
+    QString yamlPath = currentTemplateDirPath + "/calibrate_config.yaml";
+
+    // 2. 获取绝对路径（用于排查由于相对路径导致的加载失败）
+    QFileInfo ringInfo(ringPath);
+    QFileInfo yamlInfo(yamlPath);
+
+    qDebug() << "============ Path Debug Info ============";
+    qDebug() << "Template Dir: " << currentTemplateDirPath;
+    qDebug() << "Absolute Ring Path: " << ringInfo.absoluteFilePath();
+    qDebug() << "Ring File Exists? " << (ringInfo.exists() ? "YES" : "NO");
+    qDebug() << "Absolute YAML Path: " << yamlInfo.absoluteFilePath();
+    qDebug() << "YAML File Exists? " << (yamlInfo.exists() ? "YES" : "NO");
+    qDebug() << "=========================================";
+
+    if (ringInfo.exists() && yamlInfo.exists()) {
+        // 使用 toLocal8Bit().toStdString() 以支持 Windows 下的本地编码路径
+        bool ok = overlapDetector.init(ringPath.toLocal8Bit().toStdString(),
+                                       yamlPath.toLocal8Bit().toStdString());
+        if (!ok) {
+            qDebug() << "[ERROR] overlapDetector.init returned FALSE. Check if BMP is corrupted.";
+        } else {
+            qDebug() << "[SUCCESS] Overlap Engine is initialized and ready.";
+        }
+    } else {
+        qDebug() << "[ERROR] Cannot start engine: One or more files missing on disk.";
+    }
+}
 
 /**
  * @brief 加载字库按钮点击槽函数
@@ -2469,6 +2714,8 @@ void Widget::on_pushButton_4_clicked()
     wrongindex = ui->lineEdit_12->text().toInt();
 
     qDebug()<<"currentTemplate"<<currentTemplateDirPath;
+
+    initOverlapDetectorFromCurrentDir();
 
     //设置PLC参数
     //判断plc是否连接
@@ -3103,6 +3350,11 @@ if (!uiRect.isNull() && uiRect.width() > 0 && uiRect.height() > 0) {
             ui->pushButton_4->setEnabled(false);
         }
     }
+
+    if (imageLabel) {
+            imageLabel->clearSelection();
+            imageLabel->update(); // 强制触发一次重绘，擦除旧框
+        }
     qDebug() << "=== on_plcbtn_clicked() COMPLETED ===";
 }
 
@@ -3514,6 +3766,9 @@ void Widget::loadLastTemplateConfig()
         digitTemplates = tempTemplates;
         qDebug() << "[INFO] 模板加载成功，数量: " << digitTemplates.size();
     }
+
+    initOverlapDetectorFromCurrentDir();
+
 }
 
 
@@ -3576,3 +3831,4 @@ void Widget::on_pushButton_7_clicked()
     QMessageBox::information(this, "提示", "颜色通道设置成功");
 
 }
+
