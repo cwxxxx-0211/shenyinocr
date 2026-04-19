@@ -157,6 +157,7 @@ private:
     std::unique_ptr<Zhuizong> zhuizong;  ///< 跟踪辅助工具对象
     cv::Ptr<cv::MultiTracker> multiTracker;  ///< OpenCV多目标跟踪器
     std::vector<cv::Scalar> colors;      ///< 框的颜色列表
+    cv::Mat m_trackingTemplate;
 
     // ========== 配置参数 ==========
     int angle2 = 0;  ///< 图像旋转角度 (默认0，不旋转)

@@ -131,6 +131,7 @@ private:
     // OpenCV相关
     Ptr<MultiTracker> multiTracker;     // 多目标追踪器
     Zhuizong *zhuizong;                 // 追踪辅助类
+    cv::Mat m_trackingTemplate;
 
     // 相机相关
     CMvCamera *cameraPtr;               // 相机指针

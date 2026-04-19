@@ -1881,22 +1881,17 @@ void Widget::on_cancel_clicked()
 {
     qDebug() << "=== on_cancel_clicked() START ===";
 
-//    // Step 1: 关闭OpenCV窗口
-//    try {
-//        cv::destroyAllWindows();
-//        QThread::msleep(100);
-//        cv::waitKey(1);
-//    } catch (...) {}
-
     qDebug()<<"step 1";
-    // Step 2: 请求线程停止
+    // Step 2: 请求线程停止，并强制清空内存中的追踪模板
     if (myThread) {
         myThread->requestStop();
+        myThread->stopTracking(); // ★ 新增：重置追踪状态并清空内存模板
     }
 
     qDebug() << "step 2.1";
     if (cameraThread) {
         cameraThread->requestStop();
+        cameraThread->stopTracking(); // ★ 新增：重置追踪状态并清空内存模板
     }
 
     qDebug() << "step 2.2";
@@ -1938,7 +1933,6 @@ void Widget::on_cancel_clicked()
     }
 
     // 🔥 Step 5: 如果cameraThread运行过，重启相机（和旧plcbtn逻辑一样）
-    /*if (needRestartCamera && m_pcMyCamera)*/// 修改后
     if ((needRestartCamera || myThreadWasRunning) && m_pcMyCamera) {
         try {
             qDebug() << "Closing and reopening camera (silent mode)...";
@@ -1991,7 +1985,6 @@ void Widget::on_cancel_clicked()
         imageLabel->clearGreenRects();
         imageLabel->setColor(1);
         imageLabel->clearSelection();
-//        imageLabel->clear();
     }
 
     qDebug()<<"step9";
@@ -2008,20 +2001,16 @@ void Widget::on_cancel_clicked()
     x = 1;
     j = 1;
     judge = false;
-//    digitTemplates.clear();
 
     ui->statusLabel->setText("已停止");
     ui->plcbtn->setText("启动");
     ui->plcbtn->setEnabled(true);
     ui->VideoShoot->setEnabled(true);
     ui->pushButton_4->setEnabled(true);
-//    ui->ReShoot->setEnabled(true);
     isCollecting = false;
 
     qDebug() << "=== on_cancel_clicked() COMPLETED ===";
 }
-
-
 
 
 
