@@ -200,7 +200,7 @@ DetectResult OverlapDetector::processImage(const cv::Mat& bgrImage, const cv::Re
         res.valRing = rMaxV;
 
         // 🔥 修复致命BUG：将错误的 45 纠正回 0.45 ！！！！
-        if (rMaxV >= 0.45) {
+        if (rMaxV >= 0.2) {
             res.foundRing = true;
             res.locRing = cv::Point(rMaxL.x + sx, rMaxL.y + sy);
             res.angleRing = preRotatedAngles[bestAngleIdx];

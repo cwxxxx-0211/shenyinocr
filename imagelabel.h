@@ -4,6 +4,10 @@
 #include <QLabel>
 #include <QRect>
 #include <QVector>
+#include <QList>
+#include <QMouseEvent>
+#include <QPaintEvent>
+#include <QPolygonF>
 
 class ImageLabel : public QLabel
 {
@@ -11,6 +15,8 @@ class ImageLabel : public QLabel
 
 public:
     explicit ImageLabel(QWidget *parent = nullptr);
+
+    // ================= 原有的函数声明（原封不动恢复，防报错） =================
     void setColor(int color);
     void addSelectionRect(const QRect &rect, int color);
     QRect getSelectionRect() const;
@@ -24,17 +30,26 @@ public:
     void clearblueRects();
     void addSelectionPolygon(const QPolygonF &polygon, int color);
     bool isDrawing() const;
-    bool allowBlueDraw;
-    bool blueRectRedrawn;
-    int rectAdded;
 
-    // 重写setPixmap，自动按比例缩放
+    bool allowBlueDraw = false;
+    bool blueRectRedrawn = false;
+    int rectAdded = 0;
+
+    // 重写setPixmap
     void setPixmap(const QPixmap &pixmap);
+
+    // ================= 🔥 新增：双框追踪专用接口 =================
+    QRect getDetectionRect() const { return m_detectionRect; }
+    QRect getTrackingRect() const { return m_trackingRect; }
+    void resetDrawingStep();
 
 signals:
     void mousePressed(QMouseEvent *event);
     void mouseMoved(QMouseEvent *event);
     void mouseReleased(QMouseEvent *event);
+
+    // 🔥 新增：发送文本提示信号给 Widget
+    void signal_hintMessage(QString msg);
 
 protected:
     void mousePressEvent(QMouseEvent *event) override;
@@ -43,13 +58,13 @@ protected:
     void paintEvent(QPaintEvent *event) override;
 
 private:
-    struct ColoredRect
-    {
+    struct ColoredRect {
         QRect rect;
         int color;
     };
 
-    bool drawing;
+    // ================= 原有变量（恢复） =================
+    bool drawing = false;
     QPoint startPoint;
     QRect selectionRect;
     QRect selectionRect1;
@@ -61,7 +76,20 @@ private:
     QVector<QPolygonF> greenPolygons;
     QVector<QPolygonF> bluePolygons;
     QVector<ColoredRect> rectangles;
-    int m_color;
+    int m_color = 1;
+
+    // ================= 🔥 新增左键画框状态机 =================
+    enum DrawStep {
+        STEP_TRACKING,   // 第一步：正在画锚点框
+        STEP_DETECTION,  // 第二步：正在画识别框
+        STEP_DONE        // 第三步：画完了
+    };
+    DrawStep m_currentStep = STEP_TRACKING;
+
+    QRect m_detectionRect;
+    QRect m_trackingRect;
+    bool m_isInteracting = false;
+    QPoint m_startPoint;
 };
 
 #endif // IMAGELABEL_H

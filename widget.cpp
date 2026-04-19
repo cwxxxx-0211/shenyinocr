@@ -101,47 +101,7 @@ static void polyMouseCallback(int event, int x, int y, int flags, void* userdata
     }
 }
 
-static std::vector<cv::Point> getPolygonROI(const cv::Mat& img, const std::string& windowTitle) {
-    cv::Mat displayImg = img.clone();
-    int screenHeightLimit = 800;
-    double scale = 1.0;
-    if (displayImg.rows > screenHeightLimit) {
-        scale = static_cast<double>(screenHeightLimit) / displayImg.rows;
-        cv::resize(displayImg, displayImg, cv::Size(), scale, scale);
-    }
 
-    PolygonUIState state;
-    state.displayImg = displayImg;
-    state.tempImg = displayImg.clone();
-    state.windowName = windowTitle;
-
-    cv::namedWindow(windowTitle);
-    cv::setMouseCallback(windowTitle, polyMouseCallback, &state);
-
-    while (true) {
-        cv::imshow(windowTitle, state.tempImg);
-        int key = cv::waitKey(10) & 0xFF;
-        if (key == 13) { // Enter回车键确认
-            if (state.points.size() >= 3) {
-                // 首尾闭合显示一下
-                cv::line(state.tempImg, state.points.back(), state.points.front(), cv::Scalar(0, 255, 0), 2);
-                cv::imshow(windowTitle, state.tempImg);
-                cv::waitKey(300);
-            }
-            break;
-        } else if (key == 27) { // ESC键取消
-            state.points.clear();
-            break;
-        }
-    }
-    cv::destroyWindow(windowTitle);
-
-    std::vector<cv::Point> finalPts;
-    for (auto& pt : state.points) {
-        finalPts.push_back(cv::Point(static_cast<int>(pt.x / scale), static_cast<int>(pt.y / scale)));
-    }
-    return finalPts;
-}
 
 
 // ==========================================
@@ -181,6 +141,48 @@ static void quickMouseCallback(int event, int x, int y, int flags, void* userdat
     }
 }
 
+static std::vector<cv::Point> getPolygonROI(const cv::Mat& img, const std::string& windowTitle) {
+    cv::Mat displayImg = img.clone();
+    int screenHeightLimit = 800;
+    double scale = 1.0;
+    if (displayImg.rows > screenHeightLimit) {
+        scale = static_cast<double>(screenHeightLimit) / displayImg.rows;
+        cv::resize(displayImg, displayImg, cv::Size(), scale, scale);
+    }
+
+    PolygonUIState state;
+    state.displayImg = displayImg;
+    state.tempImg = displayImg.clone();
+    state.windowName = windowTitle;
+
+    cv::namedWindow(windowTitle);
+    cv::setMouseCallback(windowTitle, polyMouseCallback, &state);
+
+    while (true) {
+        cv::imshow(windowTitle, state.tempImg);
+        int key = cv::waitKey(10) & 0xFF;
+        if (key == 13) { // Enter键确认
+            if (state.points.size() >= 3) {
+                cv::line(state.tempImg, state.points.back(), state.points.front(), cv::Scalar(0, 255, 0), 2);
+                cv::imshow(windowTitle, state.tempImg);
+                cv::waitKey(300);
+            }
+            break;
+        } else if (key == 27) { // ESC键取消
+            state.points.clear();
+            break;
+        }
+    }
+    // 恢复 widget1.cpp 的简单销毁模式，不再手动注销 callback
+    cv::destroyWindow(windowTitle);
+
+    std::vector<cv::Point> finalPts;
+    for (auto& pt : state.points) {
+        finalPts.push_back(cv::Point(static_cast<int>(pt.x / scale), static_cast<int>(pt.y / scale)));
+    }
+    return finalPts;
+}
+
 static cv::Rect getQuickRectROI(const cv::Mat& img, const std::string& windowTitle) {
     cv::Mat displayImg = img.clone();
     int screenHeightLimit = 800;
@@ -200,14 +202,12 @@ static cv::Rect getQuickRectROI(const cv::Mat& img, const std::string& windowTit
 
     while (!state.isDone) {
         cv::imshow(windowTitle, state.tempImg);
-        // 允许按 ESC 强行退出，或者等待 isDone 标记
         int key = cv::waitKey(10) & 0xFF;
         if (key == 27) break;
     }
 
     cv::destroyWindow(windowTitle);
 
-    // 坐标还原
     cv::Rect finalRoi = state.roi;
     finalRoi.x = static_cast<int>(finalRoi.x / scale);
     finalRoi.y = static_cast<int>(finalRoi.y / scale);
@@ -316,6 +316,10 @@ Widget::Widget(QWidget *parent)
 
     // 连接定时器信号
     connect(timer, &QTimer::timeout, this, &Widget::rightremove);
+
+    connect(imageLabel, &ImageLabel::signal_hintMessage, this, [this](QString msg){
+            ui->statusLabel->setText(msg);
+        });
 
     // 设置默认值并加载保存的设置
     setupDefaultValues();
@@ -1477,7 +1481,7 @@ void Widget::on_VideoShoot_clicked()
     slot_displayAndDetect(myImage);
 
     // 注意：这里我们只拍照显示，不强制运行识别。用户可以在这张图上画框。
-    ui->statusLabel->setText("单次采集完成，请在图上画框并点击保存模板");
+    imageLabel->resetDrawingStep();
 }
 /**
  * @brief 连续拍照按钮点击槽函数
@@ -1881,22 +1885,22 @@ void Widget::on_cancel_clicked()
 {
     qDebug() << "=== on_cancel_clicked() START ===";
 
-    qDebug()<<"step 1";
     // Step 2: 请求线程停止，并强制清空内存中的追踪模板
     if (myThread) {
         myThread->requestStop();
-        myThread->stopTracking(); // ★ 新增：重置追踪状态并清空内存模板
+        myThread->stopTracking();
     }
 
-    qDebug() << "step 2.1";
     if (cameraThread) {
         cameraThread->requestStop();
-        cameraThread->stopTracking(); // ★ 新增：重置追踪状态并清空内存模板
+        cameraThread->stopTracking();
     }
 
-    qDebug() << "step 2.2";
+    // 🔥 清理当前类的内存模板，以便下一次能重新画框
+    m_loadedTrackingTemplate.release();
+    hasValidBoxes = false;
 
-    // 🔥 Step 3: myThread - 保持原逻辑（不删除，不重启相机）
+    // 🔥 Step 3: myThread - 保持原逻辑
     bool myThreadWasRunning = false;
     if (myThread && myThread->isRunning()) {
         myThreadWasRunning = true;
@@ -1905,39 +1909,27 @@ void Widget::on_cancel_clicked()
             qDebug() << "WARNING: myThread did not stop";
         }
     }
-    qDebug() << "step 3";
 
-    // 🔥 Step 4: cameraThread - 使用旧的plcbtn停止逻辑
-    bool needRestartCamera = false;  // 标记是否需要重启相机
-
+    // 🔥 Step 4: cameraThread - 停止逻辑
+    bool needRestartCamera = false;
     if (cameraThread != nullptr) {
-        qDebug() << "Stopping camera thread...";
-        needRestartCamera = true;  // cameraThread存在，说明需要重启相机
-
-        // 断开信号槽连接
+        needRestartCamera = true;
         disconnect(cameraThread, nullptr, this, nullptr);
         disconnect(this, nullptr, cameraThread, nullptr);
 
         cameraThread->requestStop();
-
-        // 等待线程结束
         if (!cameraThread->wait(500)) {
-            qDebug() << "Camera thread did not stop gracefully, force terminating...";
             cameraThread->terminate();
             cameraThread->wait();
         }
 
         cameraThread->deleteLater();
         cameraThread = nullptr;
-        qDebug() << "Camera thread stopped and scheduled for deletion";
     }
 
-    // 🔥 Step 5: 如果cameraThread运行过，重启相机（和旧plcbtn逻辑一样）
+    // 🔥 Step 5: 如果cameraThread运行过，重启相机
     if ((needRestartCamera || myThreadWasRunning) && m_pcMyCamera) {
         try {
-            qDebug() << "Closing and reopening camera (silent mode)...";
-
-            // 关闭相机
             m_pcMyCamera->Close();
             delete m_pcMyCamera;
             m_pcMyCamera = NULL;
@@ -1945,14 +1937,12 @@ void Widget::on_cancel_clicked()
 
             QThread::msleep(100);
 
-            // 🔥 直接重新打开（不弹提示框）
             m_pcMyCamera = new CMvCamera;
             int nRet = m_pcMyCamera->Open(m_stDevList.pDeviceInfo[0]);
 
             if (MV_OK == nRet) {
-                // 设置触发模式
                 m_pcMyCamera->SetEnumValue("TriggerMode", 1);
-                m_pcMyCamera->SetEnumValue("TriggerSource", 7);    //软触发
+                m_pcMyCamera->SetEnumValue("TriggerSource", 7);
                 m_pcMyCamera->SetFloatValue("ExposureTime", 500);
                 m_pcMyCamera->SetFloatValue("TriggerDelay", 0);
                 m_pcMyCamera->RegisterImageCallBack();
@@ -1960,34 +1950,26 @@ void Widget::on_cancel_clicked()
 
                 m_bOpenDevice = true;
                 ui->statusLabel->setText("相机已打开");
-                qDebug() << "✓ Camera restarted silently";
             } else {
                 delete m_pcMyCamera;
                 m_pcMyCamera = nullptr;
-                qDebug() << "ERROR: Failed to reopen camera";
             }
-        } catch (...) {
-            qDebug() << "Exception when restarting camera";
-        }
+        } catch (...) {}
     }
 
-    qDebug()<<"step6";
     // Step 6: 处理事件队列
     QCoreApplication::processEvents(QEventLoop::AllEvents, 1000);
 
-    qDebug()<<"step7";
     // Step 7: 清理UI和变量
     detectedRects.clear();
     selectionRect1 = QRect();
 
-    qDebug()<<"step8";
     if (imageLabel) {
         imageLabel->clearGreenRects();
         imageLabel->setColor(1);
         imageLabel->clearSelection();
     }
 
-    qDebug()<<"step9";
     ui->resultlabel->clear();
     ui->imagenum->clear();
     ui->ngnum->clear();
@@ -2279,193 +2261,98 @@ void Widget::on_pushButton_3_clicked()
  */
 void Widget::on_pushButton_5_clicked()
 {
-    // ==========================================================
-    // 🔥 核心修复 1：拦截检查。确保存图时内存里确实有刚刚拍下的原图！
-    // ==========================================================
     if (!myImage || myImage->empty()) {
-        QMessageBox::warning(this, "提示", "请先点击【软触发拍照】获取一张图像后，再进行保存！");
+        QMessageBox::warning(this, "提示", "请先拍照获取图像！");
         return;
     }
-
-    QString parentDir = "D:/muban/";
 
     bool ok;
-    QString newFolderName = QInputDialog::getText(
-        this,
-        "输入新文件夹名称",
-        "请输入要创建的模板文件夹名称：",
-        QLineEdit::Normal,
-        "",
-        &ok
-    );
+    QString newFolderName = QInputDialog::getText(this, "保存模板", "请输入文件夹名称：", QLineEdit::Normal, "", &ok);
+    if (!ok || newFolderName.isEmpty()) return;
 
-    if (!ok || newFolderName.isEmpty()) {
-        QMessageBox::information(this, "提示", "未输入文件夹名称，已取消保存！");
-        return;
-    }
-
-    // 安全地拼接路径
-    QDir parentPath(parentDir);
-    QString savePath = parentPath.absoluteFilePath(newFolderName);
-
+    QString savePath = QDir("D:/muban/").absoluteFilePath(newFolderName);
     QDir dir(savePath);
+    if (!dir.mkpath(".")) return;
 
-    // 如果文件夹已存在，询问用户是否覆盖
-    if (dir.exists()) {
-        QMessageBox::StandardButton reply;
-        reply = QMessageBox::question(this, "确认覆盖",
-                                    "模板 '" + newFolderName + "' 已存在！\n是否覆盖？",
-                                    QMessageBox::Yes | QMessageBox::No,
-                                    QMessageBox::No);
+    // 1. 获取双框坐标
+    QRect uiTrackRect = imageLabel->getTrackingRect();
+    QRect uiDetectRect = imageLabel->getDetectionRect();
 
-        if (reply == QMessageBox::No) {
-            return; // 用户取消操作
-        }
-
-        // 使用 Qt 内置的递归删除方法
-        if (!QDir(savePath).removeRecursively()) {
-            QMessageBox::warning(this, "错误", "无法删除现有模板：" + savePath);
-            return;
-        }
-    }
-
-    // 创建新文件夹
-    if (!dir.mkpath(".")) {
-        QMessageBox::warning(this, "警告", "创建模板文件夹失败：" + savePath);
+    if (uiTrackRect.isNull() || uiDetectRect.isNull()) {
+        QMessageBox::warning(this, "警告", "请在图上同时画好【追踪框】和【检测框】！");
         return;
     }
 
-    // 核心修复：直接从 UI 获取单一识别框
-    QRect uiRect = imageLabel->getSelectionRect();
-    if (!uiRect.isNull() && uiRect.width() > 0 && uiRect.height() > 0) {
+    // 2. 转换坐标 (使用局部 clone 确保计算基准稳定)
+    cv::Mat calibImg = myImage->clone();
 
-        if (!myImage || myImage->empty()) {
-            QMessageBox::warning(this, "警告", "背景图像丢失，无法计算物理坐标！");
-            return;
-        }
+    auto toPhysical = [&](QRect uiRect) -> cv::Rect2d {
+        QSize labelSize = imageLabel->size();
+        QSize imgSize(calibImg.cols, calibImg.rows);
+        QSize scaledSize = imgSize.scaled(labelSize, Qt::KeepAspectRatio);
+        int xOff = (labelSize.width() - scaledSize.width()) / 2;
+        int yOff = (labelSize.height() - scaledSize.height()) / 2;
+        double ratio = (double)imgSize.width() / scaledSize.width();
 
-        // 因为 myImage 在软触发时已经旋转完毕，宽高绝对真实
-        unsigned int camWidth = myImage->cols;
-        unsigned int camHeight = myImage->rows;
+        cv::Rect2d phys((uiRect.x() - xOff) * ratio, (uiRect.y() - yOff) * ratio,
+                        uiRect.width() * ratio, uiRect.height() * ratio);
+        phys.x = std::max(0.0, phys.x);
+        phys.y = std::max(0.0, phys.y);
+        if (phys.x + phys.width > imgSize.width()) phys.width = imgSize.width() - phys.x;
+        if (phys.y + phys.height > imgSize.height()) phys.height = imgSize.height() - phys.y;
+        return phys;
+    };
 
-        if (camWidth > 0 && camHeight > 0) {
-            // 🔥 核心修复：严格使用 size() 与显示函数保持 100% 同步基准
-            QSize originalSize(camWidth, camHeight);
-            QSize labelSize = imageLabel->size();
-            QSize scaledSize = originalSize.scaled(labelSize, Qt::KeepAspectRatio);
+    savedTrackingBox = toPhysical(uiTrackRect);
+    savedDetectionBox = toPhysical(uiDetectRect);
+    hasValidBoxes = true;
 
-            // 计算图像在 Label 中的实际留白偏移量
-            int xOffset = (labelSize.width() - scaledSize.width()) / 2;
-            int yOffset = (labelSize.height() - scaledSize.height()) / 2;
+    // 3. 物理保存
+    cv::imwrite(dir.absoluteFilePath("template_raw.png").toLocal8Bit().toStdString(), calibImg);
+    cv::Mat tplImg = calibImg(savedTrackingBox).clone();
+    cv::imwrite(dir.absoluteFilePath("tracking_template.bmp").toLocal8Bit().toStdString(), tplImg);
+    m_loadedTrackingTemplate = tplImg.clone();
 
-            // 去除留白，得到鼠标在实际纯净画面上的坐标
-            double realX = uiRect.x() - xOffset;
-            double realY = uiRect.y() - yOffset;
+    currentTemplateDirPath = savePath;
 
-            // 计算真实缩放比
-            double xRatio = static_cast<double>(camWidth) / scaledSize.width();
-            double yRatio = static_cast<double>(camHeight) / scaledSize.height();
+    // 4. 特征标定 (仅模式 0)
+    if (ui->comboBox_4->currentIndex() == 0) {
+        QMessageBox::information(this, "标定提示", "即将标定吸管口和钢印区。");
 
-            // 映射回原图物理坐标
-            cv::Rect2d physicalBox(
-                std::max(0.0, realX * xRatio),
-                std::max(0.0, realY * yRatio),
-                uiRect.width() * xRatio,
-                uiRect.height() * yRatio
-            );
+        // 吸管口标定
+        cv::Rect ringRect = getQuickRectROI(calibImg, "ROI_1");
+        if (ringRect.width > 5 && ringRect.height > 5) {
+            cv::Mat ringTpl = calibImg(ringRect).clone();
+            QString ringPath = savePath + "/template_ring.bmp";
+            cv::imwrite(ringPath.toLocal8Bit().toStdString(), ringTpl);
 
-            // 越界保护
-            if (physicalBox.x + physicalBox.width > camWidth) physicalBox.width = camWidth - physicalBox.x;
-            if (physicalBox.y + physicalBox.height > camHeight) physicalBox.height = camHeight - physicalBox.y;
+            // 计算中心点用于相对坐标转换 (仿照 widget1.cpp 逻辑)
+            cv::Point2f cRing(ringRect.x + ringRect.width / 2.0f, ringRect.y + ringRect.height / 2.0f);
 
-            savedDetectionBox = physicalBox;
-            savedTrackingBox = physicalBox;
-            hasValidBoxes = true;
-        }
-    }
-    // 拦截判断：如果即没点启动，也没在刚刚拍下的画面上画框
-    if (!hasValidBoxes) {
-        QMessageBox::warning(this, "警告",
-            "当前没有有效的识别区域！\n请在画面上用鼠标拖拽画出一个框后再点击保存。");
-        // 如果因为没画框拦截了，记得把刚刚建好的空文件夹删掉以免制造垃圾数据
-        dir.removeRecursively();
-        return;
-    }
-
-    qDebug() << "save box:";
-    qDebug() << "detectionbox:" << savedDetectionBox.x << savedDetectionBox.y
-             << savedDetectionBox.width << savedDetectionBox.height;
-
-    // ==========================================================
-    // 🔥 核心修复 3：不再使用 saveImage2Async 重新拍照
-    // 直接使用 cv::imwrite 保存全局的 *myImage (原始无损图)
-    // ==========================================================
-    QString imageFileName = savePath + "/template_raw.png";
-
-    // toLocal8Bit 防止中文路径保存失败
-    if (cv::imwrite(imageFileName.toLocal8Bit().toStdString(), *myImage)) {
-
-        // 更新当前的模板路径
-        currentTemplateDirPath = savePath;
-
-        // 保存对应的检测参数文件 (app_settings.appset) 以及物理框坐标
-        saveSettingsToDir(savePath);
-        // ================== 🔥 修改后的标定逻辑 ==================
-        if (ui->comboBox_4->currentIndex() == 0) {
-            QMessageBox::information(this, "特征标定", "即将提取特征。\n操作提示：吸管口按住鼠标拖拽，钢印鼠标逐个点击并在画完后按【Enter回车键】结束。");
-
-            cv::Mat calibImg = myImage->clone();
-
-            // 1. 获取吸管口 (仍保持原样，拖拽即刻完成)
-            std::string ringTitle = QString("第一步: 拖拽框选【吸管口】 (松开左键完成)").toLocal8Bit().toStdString();
-            cv::Rect ringRect = getQuickRectROI(calibImg, ringTitle);
-
-            if (ringRect.width > 5 && ringRect.height > 5) {
-                cv::Mat ringTpl = calibImg(ringRect).clone();
-                QString ringPath = savePath + "/template_ring.bmp";
-                cv::imwrite(ringPath.toLocal8Bit().toStdString(), ringTpl);
-
-                cv::Point2f cRing(ringRect.x + ringRect.width / 2.0f, ringRect.y + ringRect.height / 2.0f);
-
-                // 2. 获取钢印 (改为多边形描点，最后按回车键完成)
-                std::string stampTitle = QString("第二步: 左键依次点击绘制多边形【钢印区域】 (按Enter回车完成)").toLocal8Bit().toStdString();
-                std::vector<cv::Point> stampPts = getPolygonROI(calibImg, stampTitle);
-
-                if (stampPts.size() >= 3) {
-                    // 将多边形的各个顶点转换为相对坐标存入 vector
-                    std::vector<cv::Point2f> relStamp;
-                    for (const auto& pt : stampPts) {
-                        relStamp.push_back(cv::Point2f(pt.x - cRing.x, pt.y - cRing.y));
-                    }
-
-                    // 写入 YAML 参数
-                    QString yamlPath = savePath + "/calibrate_config.yaml";
-                    cv::FileStorage fs(yamlPath.toLocal8Bit().toStdString(), cv::FileStorage::WRITE);
-                    fs << "stamp_poly" << relStamp;
-                    fs.release();
-
-                    // 初始化引擎
-                    overlapDetector.init(ringPath.toLocal8Bit().toStdString(), yamlPath.toLocal8Bit().toStdString());
-                    QMessageBox::information(this, "保存成功", "特征标定与模板建档已全部完成！");
-                } else {
-                    QMessageBox::warning(this, "标定取消", "未选择有效的钢印区域 (需要至少点击三个点构成的多边形)。");
+            // 钢印多边形标定
+            std::vector<cv::Point> stampPts = getPolygonROI(calibImg, "ROI_2");
+            if (stampPts.size() >= 3) {
+                // 转换相对坐标并使用 FileStorage 保存 (关键：确保引擎能读懂)
+                std::vector<cv::Point2f> relStamp;
+                for (const auto& pt : stampPts) {
+                    relStamp.push_back(cv::Point2f(pt.x - cRing.x, pt.y - cRing.y));
                 }
-            } else {
-                QMessageBox::warning(this, "标定取消", "未选择有效的吸管口区域。");
+
+                QString yamlPath = savePath + "/calibrate_config.yaml";
+                cv::FileStorage fs(yamlPath.toLocal8Bit().toStdString(), cv::FileStorage::WRITE);
+                fs << "stamp_poly" << relStamp;
+                fs.release();
+
+                // 重新初始化检测引擎
+                initOverlapDetectorFromCurrentDir();
             }
         }
-
- else {
-            QMessageBox::information(this, "提示", "原图与检测参数已成功保存至：\n" + savePath);
-        }
-        // ===============================================================
-
-    } else {
-        QMessageBox::critical(this, "错误", "图像文件保存失败！请检查系统路径权限。");
-        dir.removeRecursively();
     }
-}
 
+    // 5. 保存所有配置
+    saveSettingsToDir(savePath);
+    QMessageBox::information(this, "成功", "模板及双框配置已全部保存！");
+}
 
 // 先定义一个保存参数到指定文件夹的函数（可放在Widget类中）
 void Widget::saveSettingsToDir(const QString &dirPath)
@@ -2719,114 +2606,82 @@ void Widget::on_pushButton_9_clicked()
 
 void Widget::loadSettingsFromDir(const QString &dirPath)
 {
-    // 配置文件路径：用户选择的文件夹 + "app_settings.ini"
+    // 配置文件路径：用户选择的文件夹 + "app_settings.appset"
     QString settingsFilePath = dirPath + "/app_settings.appset";
     QSettings settings(settingsFilePath, QSettings::IniFormat); // 对应保存时的INI格式
 
-    // 以下逻辑与原loadSettings完全一致，只是读取路径改为指定文件夹
-    if (settings.contains("spinbox_value"))
-        ui->spinBox->setValue(settings.value("spinbox_value").toInt());
-
-    if (settings.contains("lineEdit_6_value"))
-        ui->lineEdit_6->setText(settings.value("lineEdit_6_value").toString());
-
-    if (settings.contains("lineEdit_7_value"))
-        ui->lineEdit_7->setText(settings.value("lineEdit_7_value").toString());
-
-    if (settings.contains("lineEdit_8_value"))
-        ui->lineEdit_8->setText(settings.value("lineEdit_8_value").toString());
-
-    if (settings.contains("lineEdit_20_value"))
-        ui->lineEdit_20->setText(settings.value("lineEdit_20_value").toString());
-
-    if (settings.contains("lineEdit_12_value"))
-        ui->lineEdit_12->setText(settings.value("lineEdit_12_value").toString());
-
-    if (settings.contains("lineEdit_4_value"))
-        ui->lineEdit_4->setText(settings.value("lineEdit_4_value").toString());
-
-    if (settings.contains("lineEdit_13_value"))
-        ui->lineEdit_13->setText(settings.value("lineEdit_13_value").toString());
-
-    if (settings.contains("lineEdit_15_value"))
-        ui->lineEdit_15->setText(settings.value("lineEdit_15_value").toString());
-
-    if (settings.contains("lineEdit_18_value"))
-        ui->lineEdit_18->setText(settings.value("lineEdit_18_value").toString());
-
-    if (settings.contains("lineEdit_19_value"))
-        ui->lineEdit_19->setText(settings.value("lineEdit_19_value").toString());
-
-    if (settings.contains("lineEdit_yuzhi_value"))
-        ui->lineEdit_yuzhi->setText(settings.value("lineEdit_yuzhi_value").toString());
+    if (settings.contains("spinbox_value")) ui->spinBox->setValue(settings.value("spinbox_value").toInt());
+    if (settings.contains("lineEdit_6_value")) ui->lineEdit_6->setText(settings.value("lineEdit_6_value").toString());
+    if (settings.contains("lineEdit_7_value")) ui->lineEdit_7->setText(settings.value("lineEdit_7_value").toString());
+    if (settings.contains("lineEdit_8_value")) ui->lineEdit_8->setText(settings.value("lineEdit_8_value").toString());
+    if (settings.contains("lineEdit_20_value")) ui->lineEdit_20->setText(settings.value("lineEdit_20_value").toString());
+    if (settings.contains("lineEdit_12_value")) ui->lineEdit_12->setText(settings.value("lineEdit_12_value").toString());
+    if (settings.contains("lineEdit_4_value")) ui->lineEdit_4->setText(settings.value("lineEdit_4_value").toString());
+    if (settings.contains("lineEdit_13_value")) ui->lineEdit_13->setText(settings.value("lineEdit_13_value").toString());
+    if (settings.contains("lineEdit_15_value")) ui->lineEdit_15->setText(settings.value("lineEdit_15_value").toString());
+    if (settings.contains("lineEdit_18_value")) ui->lineEdit_18->setText(settings.value("lineEdit_18_value").toString());
+    if (settings.contains("lineEdit_19_value")) ui->lineEdit_19->setText(settings.value("lineEdit_19_value").toString());
+    if (settings.contains("lineEdit_yuzhi_value")) ui->lineEdit_yuzhi->setText(settings.value("lineEdit_yuzhi_value").toString());
 
     if (settings.contains("dateEdit_value")) {
         ui->dateEdit->setPlainText(settings.value("dateEdit_value").toString());
     }
 
-    if (settings.contains("comboBox_value"))
-    {
+    if (settings.contains("comboBox_value")) {
         QString value = settings.value("comboBox_value").toString();
         int index = ui->comboBox->findText(value);
-        if (index >= 0)
-            ui->comboBox->setCurrentIndex(index);
+        if (index >= 0) ui->comboBox->setCurrentIndex(index);
     }
-
-    if (settings.contains("comboBox_2_value"))
-    {
+    if (settings.contains("comboBox_2_value")) {
         QString value = settings.value("comboBox_2_value").toString();
         int index = ui->comboBox_2->findText(value);
-        if (index >= 0)
-            ui->comboBox_2->setCurrentIndex(index);
+        if (index >= 0) ui->comboBox_2->setCurrentIndex(index);
     }
-
-    if (settings.contains("comboBox_3_value"))
-    {
+    if (settings.contains("comboBox_3_value")) {
         QString value1 = settings.value("comboBox_3_value").toString();
         int index = ui->comboBox_3->findText(value1);
-        if (index >= 0)
-            ui->comboBox_3->setCurrentIndex(index);
+        if (index >= 0) ui->comboBox_3->setCurrentIndex(index);
     }
-
-    if (settings.contains("comboBox_4_value"))
-    {
+    if (settings.contains("comboBox_4_value")) {
         QString value2 = settings.value("comboBox_4_value").toString();
         int index = ui->comboBox_4->findText(value2);
-        if (index >= 0)
-            ui->comboBox_4->setCurrentIndex(index);
+        if (index >= 0) ui->comboBox_4->setCurrentIndex(index);
     }
 
     if (settings.contains("TemplateDirPath")) {
         currentTemplateDirPath = settings.value("TemplateDirPath").toString();
     }
-
     if (settings.contains("saveDirPath")) {
         selectedDir = settings.value("saveDirPath").toString();
     }
 
+    // 🔥 加载双框坐标
+    if (settings.contains("hasValidBoxes") && settings.value("hasValidBoxes").toBool()) {
+        savedDetectionBox.x = settings.value("detectionBox_x", 0).toDouble();
+        savedDetectionBox.y = settings.value("detectionBox_y", 0).toDouble();
+        savedDetectionBox.width = settings.value("detectionBox_width", 0).toDouble();
+        savedDetectionBox.height = settings.value("detectionBox_height", 0).toDouble();
 
-    // 🔥 新增：加载框坐标
-       if (settings.contains("hasValidBoxes") && settings.value("hasValidBoxes").toBool()) {
-           savedDetectionBox.x = settings.value("detectionBox_x", 0).toDouble();
-           savedDetectionBox.y = settings.value("detectionBox_y", 0).toDouble();
-           savedDetectionBox.width = settings.value("detectionBox_width", 0).toDouble();
-           savedDetectionBox.height = settings.value("detectionBox_height", 0).toDouble();
+        savedTrackingBox.x = settings.value("trackingBox_x", 0).toDouble();
+        savedTrackingBox.y = settings.value("trackingBox_y", 0).toDouble();
+        savedTrackingBox.width = settings.value("trackingBox_width", 0).toDouble();
+        savedTrackingBox.height = settings.value("trackingBox_height", 0).toDouble();
 
-           savedTrackingBox.x = settings.value("trackingBox_x", 0).toDouble();
-           savedTrackingBox.y = settings.value("trackingBox_y", 0).toDouble();
-           savedTrackingBox.width = settings.value("trackingBox_width", 0).toDouble();
-           savedTrackingBox.height = settings.value("trackingBox_height", 0).toDouble();
+        hasValidBoxes = true;
+        qDebug() << "box load success";
+    } else {
+        hasValidBoxes = false;
+        qDebug() << "no usesful box";
+    }
 
-           hasValidBoxes = true;
-           qDebug() << "box load success";
-           qDebug() << "detectionbox:" << savedDetectionBox.x << savedDetectionBox.y
-                    << savedDetectionBox.width << savedDetectionBox.height;
-           qDebug() << "trackbox:" << savedTrackingBox.x << savedTrackingBox.y
-                    << savedTrackingBox.width << savedTrackingBox.height;
-       } else {
-           hasValidBoxes = false;
-           qDebug() << "no usesful box";
-       }
+    // 🔥 新增：加载局部静态追踪模板 (Anchor Template)
+    QString tplPath = dirPath + "/tracking_template.bmp";
+    m_loadedTrackingTemplate = cv::imread(tplPath.toLocal8Bit().toStdString(), cv::IMREAD_COLOR);
+    if (!m_loadedTrackingTemplate.empty()) {
+        qDebug() << "成功加载锚点追踪模板图片：" << tplPath;
+    } else {
+        qDebug() << "警告：未找到 tracking_template.bmp";
+    }
 }
 
 
@@ -3029,67 +2884,18 @@ void Widget::on_plcbtn_clicked()
         return;
     }
 
-    // 核心修复：直接从 UI 获取单一识别框
-QRect uiRect = imageLabel->getSelectionRect();
-if (!uiRect.isNull() && uiRect.width() > 0 && uiRect.height() > 0) {
-
-    if (!myImage || myImage->empty()) {
-        QMessageBox::warning(this, "警告", "背景图像丢失，无法计算物理坐标！");
-        return;
-    }
-
-    // 因为 myImage 在软触发时已经旋转完毕，宽高绝对真实
-    unsigned int camWidth = myImage->cols;
-    unsigned int camHeight = myImage->rows;
-
-    if (camWidth > 0 && camHeight > 0) {
-        // 🔥 核心修复：严格使用 size() 与显示函数保持 100% 同步基准
-        QSize originalSize(camWidth, camHeight);
-        QSize labelSize = imageLabel->size();
-        QSize scaledSize = originalSize.scaled(labelSize, Qt::KeepAspectRatio);
-
-        // 计算图像在 Label 中的实际留白偏移量
-        int xOffset = (labelSize.width() - scaledSize.width()) / 2;
-        int yOffset = (labelSize.height() - scaledSize.height()) / 2;
-
-        // 去除留白，得到鼠标在实际纯净画面上的坐标
-        double realX = uiRect.x() - xOffset;
-        double realY = uiRect.y() - yOffset;
-
-        // 计算真实缩放比
-        double xRatio = static_cast<double>(camWidth) / scaledSize.width();
-        double yRatio = static_cast<double>(camHeight) / scaledSize.height();
-
-        // 映射回原图物理坐标
-        cv::Rect2d physicalBox(
-            std::max(0.0, realX * xRatio),
-            std::max(0.0, realY * yRatio),
-            uiRect.width() * xRatio,
-            uiRect.height() * yRatio
-        );
-
-        // 越界保护
-        if (physicalBox.x + physicalBox.width > camWidth) physicalBox.width = camWidth - physicalBox.x;
-        if (physicalBox.y + physicalBox.height > camHeight) physicalBox.height = camHeight - physicalBox.y;
-
-        savedDetectionBox = physicalBox;
-        savedTrackingBox = physicalBox;
-        hasValidBoxes = true;
-    }
-}
-
-    // 强校验：没画框就不让启动
-    if (!hasValidBoxes) {
-        QMessageBox::warning(this, "提示", "请先点击【软触发拍照】，并在画面上画出要识别的区域！");
+    // 🔥 核心修改：不再从界面动态抓取框，而是严格要求有预载的模板
+    if (!hasValidBoxes || m_loadedTrackingTemplate.empty()) {
+        QMessageBox::warning(this, "操作规范", "缺乏追踪模板，无法启动！\n\n1. 如果是新产品：请先【拍照】，画好双框并点击【保存模板】\n2. 如果是换线复用：请先点击【加载模板】");
         return;
     }
 
     // ==========================================================
-    // 以下为原有启动线程逻辑，保持功能完整不丢失
+    // 以下为原有启动线程逻辑，完全保留你所有的 PLC/相机 流程
     // ==========================================================
     if (ui->checkBox->isChecked())
     {
-        // 外部触发/间歇模式逻辑
+        // 外部触发/硬触发模式逻辑
         int exposureValue = ui->spinBox->value();
         m_pcMyCamera->SetFloatValue("ExposureTime", exposureValue);
 
@@ -3137,10 +2943,9 @@ if (!uiRect.isNull() && uiRect.width() > 0 && uiRect.height() > 0) {
 
         cameraThread = new CameraThread(this, m_pcMyCamera);
 
-        // 🔥 将单框坐标传递给线程
-        if (hasValidBoxes) {
-            cameraThread->setPresetBoxes(savedDetectionBox, savedTrackingBox);
-        }
+        // 🔥 核心修改：将双框坐标和静态模板喂给线程
+        cameraThread->setPresetBoxes(savedDetectionBox, savedTrackingBox);
+        cameraThread->setPreloadedTemplate(m_loadedTrackingTemplate);
 
         // 连接所有功能信号
         connect(this, &Widget::rotate, cameraThread, &CameraThread::receiveangle1);
@@ -3189,10 +2994,10 @@ if (!uiRect.isNull() && uiRect.width() > 0 && uiRect.height() > 0) {
         ensureThreadsReady();
         if (!myThread) reinitializeMyThread();
 
-        // 🔥 将单框坐标传递给线程
-        if (hasValidBoxes) {
-            myThread->setPresetBoxes(savedDetectionBox, savedTrackingBox);
-        }
+        // 🔥 核心修改：将双框坐标和静态模板喂给线程
+        myThread->setPresetBoxes(savedDetectionBox, savedTrackingBox);
+        myThread->setPreloadedTemplate(m_loadedTrackingTemplate);
+
         connect(myThread, &MyThread::signal_boxesSelected, this, &Widget::slot_saveBoxesFromThread, Qt::QueuedConnection);
 
         // 发送参数
@@ -3214,13 +3019,9 @@ if (!uiRect.isNull() && uiRect.width() > 0 && uiRect.height() > 0) {
         }
     }
 
-    if (imageLabel) {
-            imageLabel->clearSelection();
-            imageLabel->update(); // 强制触发一次重绘，擦除旧框
-        }
+
     qDebug() << "=== on_plcbtn_clicked() COMPLETED ===";
 }
-
 // 检测相机
 void Widget::on_HandwareDetect_clicked()
 {
@@ -3695,3 +3496,35 @@ void Widget::on_pushButton_7_clicked()
 
 }
 
+
+void Widget::on_pushButton_11_clicked()
+{
+    // 1. 检查是否已经加载了模板文件夹
+    if (currentTemplateDirPath.isEmpty()) {
+        QMessageBox::warning(this, "提示", "当前没有加载任何模板！\n请先点击【加载模板】后再尝试更新参数。");
+        return;
+    }
+
+    // 2. 检查该文件夹在硬盘上是否仍然存在
+    QDir dir(currentTemplateDirPath);
+    if (!dir.exists()) {
+        QMessageBox::warning(this, "错误", "当前使用的模板文件夹不存在或已被删除，无法更新参数！");
+        return;
+    }
+
+    // 3. 复用保存参数逻辑
+    // 此时不会去读取 ImageLabel 上可能新画的框，
+    // 内存中的 savedDetectionBox 和 savedTrackingBox 依然是原模板的坐标。
+    // 因此调用此函数会用最新的 UI 参数覆盖 app_settings.appset，但完美保留原始框坐标。
+    saveSettingsToDir(currentTemplateDirPath);
+
+    // 4. 同时更新全局配置记录（软件下次启动时的默认参数）
+    saveSettings();
+
+    // 5. 如果修改了目标字符，需要触发一次内存模板的重新加载机制
+    // 以防止仅仅修改了字库却因为没有重新加载导致无法生效
+    loadLastTemplateConfig();
+
+    QMessageBox::information(this, "成功", QString("已成功更新当前模板的参数配置！\n(模板：%1)\n注：原始追踪框与识别框坐标保持不变。")
+                                           .arg(dir.dirName()));
+}

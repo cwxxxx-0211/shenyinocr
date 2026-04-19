@@ -75,6 +75,14 @@ public:
     // 🔥 新增：清除预设框
     void clearPresetBoxes();
 
+    // 🔥 新增：接收从硬盘加载的静态完美模板
+    void setPreloadedTemplate(const cv::Mat& tpl) {
+        if (!tpl.empty()) {
+            m_trackingTemplate = tpl.clone();
+            tracking = true; // 拥有模板后，直接跳过首帧抠图，进入追踪模式
+        }
+    }
+
     // ========== 公共配置变量 ==========
     QString receivedata;          ///< 检测延时时间（毫秒）
     QString choicedata = "MOSSE"; ///< 追踪算法名称（当前固定为MOSSE）
@@ -155,7 +163,6 @@ private:
     // ========== 跟踪相关 ==========
     bool tracking = false;               ///< 是否正在跟踪（默认false）
     std::unique_ptr<Zhuizong> zhuizong;  ///< 跟踪辅助工具对象
-    cv::Ptr<cv::MultiTracker> multiTracker;  ///< OpenCV多目标跟踪器
     std::vector<cv::Scalar> colors;      ///< 框的颜色列表
     cv::Mat m_trackingTemplate;
 

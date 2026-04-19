@@ -207,7 +207,11 @@ private slots:
 
     void on_pushButton_7_clicked();
 
+
+    void on_pushButton_11_clicked();
+
 private:
+    cv::Mat m_loadedTrackingTemplate;
     // ========== UI对象 ==========
     Ui::Widget *ui;                     ///< UI界面指针
 

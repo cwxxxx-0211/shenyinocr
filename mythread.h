@@ -78,6 +78,14 @@ public:
     // 🔥 新增：清除预设框
     void clearPresetBoxes();
 
+    // 🔥 新增：接收从硬盘加载的静态完美模板
+    void setPreloadedTemplate(const cv::Mat& tpl) {
+        if (!tpl.empty()) {
+            m_trackingTemplate = tpl.clone();
+            m_tracking.store(true); // 拥有模板后，直接跳过首帧抠图，进入追踪模式
+        }
+    }
+
 signals:
     /**
      * @brief 发送图像信号（用于显示）
@@ -129,7 +137,6 @@ private:
     QImage *myImage;                    // QImage图像对象
 
     // OpenCV相关
-    Ptr<MultiTracker> multiTracker;     // 多目标追踪器
     Zhuizong *zhuizong;                 // 追踪辅助类
     cv::Mat m_trackingTemplate;
 
