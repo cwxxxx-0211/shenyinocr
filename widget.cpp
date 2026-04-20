@@ -314,6 +314,16 @@ Widget::Widget(QWidget *parent)
     // 设置文本框自动换行
     ui->dateEdit->setWordWrapMode(QTextOption::WordWrap);
 
+    // 禁用焦点滚动调节（防误触）- 遍历全局所有下拉框和数字输入框，一劳永逸
+    QList<QComboBox *> comboBoxes = this->findChildren<QComboBox *>();
+    for (QComboBox *cb : comboBoxes) {
+        cb->installEventFilter(this);
+    }
+    QList<QAbstractSpinBox *> spinBoxes = this->findChildren<QAbstractSpinBox *>();
+    for (QAbstractSpinBox *sb : spinBoxes) {
+        sb->installEventFilter(this);
+    }
+
     // 连接定时器信号
     connect(timer, &QTimer::timeout, this, &Widget::rightremove);
 
@@ -2369,6 +2379,7 @@ void Widget::saveSettingsToDir(const QString &dirPath)
 
     // 保存所有参数（与原逻辑一致，只是路径改为指定文件夹）
     settings.setValue("spinbox_value", ui->spinBox->text());
+    settings.setValue("lineEdit_14_value", ui->lineEdit_14->text()); // 相机增益
     settings.setValue("lineEdit_6_value", ui->lineEdit_6->text());
     settings.setValue("lineEdit_7_value", ui->lineEdit_7->text());
     settings.setValue("lineEdit_8_value", ui->lineEdit_8->text());
@@ -2611,6 +2622,7 @@ void Widget::loadSettingsFromDir(const QString &dirPath)
     QSettings settings(settingsFilePath, QSettings::IniFormat); // 对应保存时的INI格式
 
     if (settings.contains("spinbox_value")) ui->spinBox->setValue(settings.value("spinbox_value").toInt());
+    if (settings.contains("lineEdit_14_value")) ui->lineEdit_14->setText(settings.value("lineEdit_14_value").toString()); // 初始化增益显示
     if (settings.contains("lineEdit_6_value")) ui->lineEdit_6->setText(settings.value("lineEdit_6_value").toString());
     if (settings.contains("lineEdit_7_value")) ui->lineEdit_7->setText(settings.value("lineEdit_7_value").toString());
     if (settings.contains("lineEdit_8_value")) ui->lineEdit_8->setText(settings.value("lineEdit_8_value").toString());
@@ -2695,6 +2707,9 @@ void Widget::loadSettings()
 
     if (settings.contains("spinbox_value"))
         ui->spinBox->setValue(settings.value("spinbox_value").toInt());
+        
+    if (settings.contains("lineEdit_14_value"))
+        ui->lineEdit_14->setText(settings.value("lineEdit_14_value").toString());
 
     if (settings.contains("lineEdit_6_value"))
         ui->lineEdit_6->setText(settings.value("lineEdit_6_value").toString());
@@ -2790,6 +2805,7 @@ void Widget::saveSettings()
     QSettings settings("YourCompany", "YourApplication");
 
     settings.setValue("spinbox_value", ui->spinBox->text());
+    settings.setValue("lineEdit_14_value", ui->lineEdit_14->text()); // 固化全局相机增益
     settings.setValue("lineEdit_6_value", ui->lineEdit_6->text());
     settings.setValue("lineEdit_7_value", ui->lineEdit_7->text());
     settings.setValue("lineEdit_8_value", ui->lineEdit_8->text());
@@ -2831,6 +2847,7 @@ void Widget::setupDefaultValues()
     ui->lineEdit_yuzhi->setText("70");
     ui->dateEdit->setPlainText("");
     ui->spinBox->setValue(800);
+    ui->lineEdit_14->setText("1.0"); // 默认增益
     ui->comboBox->setCurrentText("不保存图像");
     ui->comboBox_4->setCurrentText("字库匹配");
     ui->comboBox_2->setCurrentText("无旋转");
@@ -2838,15 +2855,28 @@ void Widget::setupDefaultValues()
     ui->checkBox->setChecked(true);
 }
 
+// ================= 拦截滚轮误操作事件 =================
+bool Widget::eventFilter(QObject *watched, QEvent *event)
+{
+    if (event->type() == QEvent::Wheel) {
+        // 利用类的继承关系，全局拦截所有 QComboBox 和 QAbstractSpinBox(如QSpinBox, QDoubleSpinBox)
+        if (watched->inherits("QComboBox") || watched->inherits("QAbstractSpinBox")) {
+            return true; // 返回 true 表示事件已处理（被丢弃），彻底禁止滚轮
+        }
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
 //关闭相机按钮
 void Widget::on_CloseCamera_clicked()
 {
-    if (myThread->isRunning())
+    // 如果系统正在采集中（软触发或硬触发线程在跑），拦截关闭并提示
+    if ((myThread && myThread->isRunning()) || (cameraThread && cameraThread->isRunning()) || isCollecting)
     {
-        myThread->requestInterruption();
-        myThread->wait();
-        myThread->stop();
+        QMessageBox::warning(this, "警告", "相机正在检测采图中！\n请先点击【停止识别】完全停止检测后，再关闭相机。");
+        return;
     }
+
     if (m_pcMyCamera)
     {
         m_pcMyCamera->Close();
@@ -2897,7 +2927,9 @@ void Widget::on_plcbtn_clicked()
     {
         // 外部触发/硬触发模式逻辑
         int exposureValue = ui->spinBox->value();
+        float gainValue = ui->lineEdit_14->text().toFloat();
         m_pcMyCamera->SetFloatValue("ExposureTime", exposureValue);
+        m_pcMyCamera->SetFloatValue("Gain", gainValue);
 
         if (isCollecting) {
             QMessageBox::information(this, "提示", "已在采集中，若要停止请点击【取消识别】按钮");
@@ -2921,6 +2953,7 @@ void Widget::on_plcbtn_clicked()
                 m_pcMyCamera->SetEnumValue("TriggerMode", 1);
                 m_pcMyCamera->SetEnumValue("TriggerSource", 0); // 硬触发
                 m_pcMyCamera->SetFloatValue("ExposureTime", exposureValue);
+                m_pcMyCamera->SetFloatValue("Gain", gainValue); // 恢复写入增益
                 m_pcMyCamera->SetFloatValue("TriggerDelay", 0);
                 m_pcMyCamera->RegisterImageCallBack();
                 m_pcMyCamera->StartGrabbing();
@@ -2989,7 +3022,9 @@ void Widget::on_plcbtn_clicked()
     {
         // 软触发/连续模式逻辑
         int exposureValue = ui->spinBox->value();
+        float gainValue = ui->lineEdit_14->text().toFloat();
         m_pcMyCamera->SetFloatValue("ExposureTime", exposureValue);
+        m_pcMyCamera->SetFloatValue("Gain", gainValue); // 软触发切入时也保持增益同步
 
         ensureThreadsReady();
         if (!myThread) reinitializeMyThread();
@@ -3007,6 +3042,7 @@ void Widget::on_plcbtn_clicked()
         emit sendDataTo(ui->lineEdit_4->text());
 
         m_pcMyCamera->SetEnumValue("TriggerSource", 7); // 软触发
+        m_pcMyCamera->SetFloatValue("Gain", gainValue); // 软触发重新设置增益
         myThread->getCameraPtr(m_pcMyCamera);
         myThread->getImagePtr(myImage);
 
@@ -3527,4 +3563,51 @@ void Widget::on_pushButton_11_clicked()
 
     QMessageBox::information(this, "成功", QString("已成功更新当前模板的参数配置！\n(模板：%1)\n注：原始追踪框与识别框坐标保持不变。")
                                            .arg(dir.dirName()));
+}
+
+
+//设置相机增益
+void Widget::on_pushButton_12_clicked()
+{
+    if (m_pcMyCamera == nullptr || m_bOpenDevice == false) {
+        QMessageBox::warning(this, "提示", "相机未初始化或未打开，无法设置增益！");
+        return;
+    }
+
+    // 首先获取当前相机允许的增益范围
+    MVCC_FLOATVALUE stParam = {0};
+    int nRet = m_pcMyCamera->GetFloatValue("Gain", &stParam);
+    if (nRet != MV_OK) {
+        QMessageBox::warning(this, "提示", QString("无法获取相机增益支持的范围！错误码：%1").arg(nRet));
+        return;
+    }
+
+    // 获取lineEdit_14中设置的增益值
+    QString gainStr = ui->lineEdit_14->text();
+    bool isOk = false;
+    float gainValue = gainStr.toFloat(&isOk);
+
+    if (!isOk) {
+        QMessageBox::warning(this, "提示", QString("请输入有效的增益数字！\n当前相机允许范围：%1 ~ %2").arg(stParam.fMin).arg(stParam.fMax));
+        return;
+    }
+
+    // 检查输入值是否在支持的范围内
+    if (gainValue < stParam.fMin || gainValue > stParam.fMax) {
+        QMessageBox::warning(this, "提示", QString("输入的增益值超出限制！\n当前相机允许范围：%1 ~ %2").arg(stParam.fMin).arg(stParam.fMax));
+        // 可以选择自动规整到最大或最小值
+        // gainValue = qBound(stParam.fMin, gainValue, stParam.fMax);
+        // ui->lineEdit_14->setText(QString::number(gainValue));
+        return;
+    }
+
+    // 调用SDK接口设置增益
+    nRet = m_pcMyCamera->SetFloatValue("Gain", gainValue);
+    if (nRet == MV_OK) {
+        qDebug() << "SetGain success:" << gainValue;
+        QMessageBox::information(this, "提示", "相机增益设置成功！");
+    } else {
+        qDebug() << "SetGain failed! Ret:" << nRet;
+        QMessageBox::warning(this, "提示", QString("相机增益设置失败！错误码：%1").arg(nRet));
+    }
 }

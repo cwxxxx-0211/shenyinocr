@@ -210,6 +210,11 @@ private slots:
 
     void on_pushButton_11_clicked();
 
+    void on_pushButton_12_clicked();
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
+
 private:
     cv::Mat m_loadedTrackingTemplate;
     // ========== UI对象 ==========
