@@ -240,7 +240,7 @@
             </size>
            </property>
            <property name="text">
-            <string>停止</string>
+            <string>停止识别</string>
            </property>
            <property name="icon">
             <iconset resource="image/image.qrc">
@@ -879,7 +879,7 @@
                <x>0</x>
                <y>0</y>
                <width>600</width>
-               <height>363</height>
+               <height>361</height>
               </rect>
              </property>
              <property name="styleSheet">
@@ -999,9 +999,9 @@
              <property name="geometry">
               <rect>
                <x>0</x>
-               <y>0</y>
+               <y>-193</y>
                <width>586</width>
-               <height>1076</height>
+               <height>1205</height>
               </rect>
              </property>
              <property name="styleSheet">
@@ -1087,21 +1087,17 @@
                   </widget>
                  </item>
                  <item row="2" column="0">
-                  <layout class="QHBoxLayout">
-                   <item>
-                    <widget class="QCheckBox" name="checkBox">
-                     <property name="minimumSize">
-                      <size>
-                       <width>0</width>
-                       <height>42</height>
-                      </size>
-                     </property>
-                     <property name="text">
-                      <string>启用触发</string>
-                     </property>
-                    </widget>
-                   </item>
-                  </layout>
+                  <widget class="QCheckBox" name="checkBox">
+                   <property name="minimumSize">
+                    <size>
+                     <width>0</width>
+                     <height>42</height>
+                    </size>
+                   </property>
+                   <property name="text">
+                    <string>启用触发</string>
+                   </property>
+                  </widget>
                  </item>
                  <item row="2" column="1">
                   <widget class="QPushButton" name="pushButton_6">
@@ -1159,36 +1155,12 @@
                    </item>
                   </widget>
                  </item>
-                 <item row="4" column="0">
-                  <widget class="QPushButton" name="pushButton_11">
-                   <property name="text">
-                    <string>保存参数</string>
-                   </property>
-                  </widget>
-                 </item>
                  <item row="4" column="1">
                   <widget class="QPushButton" name="pushButton_7">
                    <property name="text">
                     <string>确认</string>
                    </property>
                   </widget>
-                 </item>
-                 <item row="5" column="0">
-                  <layout class="QHBoxLayout">
-                   <item>
-                    <widget class="QPushButton" name="pushButton_5">
-                     <property name="minimumSize">
-                      <size>
-                       <width>0</width>
-                       <height>42</height>
-                      </size>
-                     </property>
-                     <property name="text">
-                      <string>保存模板</string>
-                     </property>
-                    </widget>
-                   </item>
-                  </layout>
                  </item>
                  <item row="5" column="1">
                   <widget class="QToolButton" name="Saveimage">
@@ -1200,6 +1172,68 @@
                    </property>
                    <property name="text">
                     <string>自动分割</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="7" column="1">
+                  <widget class="QPushButton" name="pushButton_11">
+                   <property name="font">
+                    <font>
+                     <pointsize>9</pointsize>
+                     <weight>75</weight>
+                     <bold>true</bold>
+                    </font>
+                   </property>
+                   <property name="styleSheet">
+                    <string notr="true">QPushButton {
+    background-color: #0078D7; /* 醒目的蓝色 */
+    color: white;              /* 白色文字 */
+    border-radius: 4px;        /* 圆角边缘 */
+    border: 1px solid #005A9E; 
+}
+QPushButton:hover {
+    background-color: #1084D0; /* 鼠标悬停时稍微变亮 */
+}
+QPushButton:pressed {
+    background-color: #005A9E; /* 按下时变暗 */
+}</string>
+                   </property>
+                   <property name="text">
+                    <string>保存参数</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="6" column="1">
+                  <widget class="QPushButton" name="pushButton_5">
+                   <property name="minimumSize">
+                    <size>
+                     <width>0</width>
+                     <height>0</height>
+                    </size>
+                   </property>
+                   <property name="font">
+                    <font>
+                     <pointsize>9</pointsize>
+                     <weight>75</weight>
+                     <bold>true</bold>
+                    </font>
+                   </property>
+                   <property name="styleSheet">
+                    <string notr="true">QPushButton {
+    background-color: #0078D7; /* 醒目的蓝色 */
+    color: white;              /* 白色文字 */
+    border-radius: 4px;        /* 圆角边缘 */
+    border: 1px solid #005A9E; 
+}
+QPushButton:hover {
+    background-color: #1084D0; /* 鼠标悬停时稍微变亮 */
+}
+QPushButton:pressed {
+    background-color: #005A9E; /* 按下时变暗 */
+}</string>
+                   </property>
+                   <property name="text">
+                    <string>保存模板</string>
                    </property>
                   </widget>
                  </item>
@@ -1218,7 +1252,56 @@
                  <property name="verticalSpacing">
                   <number>15</number>
                  </property>
-                 <item row="3" column="1">
+                 <item row="1" column="0">
+                  <widget class="QLabel" name="label_4">
+                   <property name="text">
+                    <string>图像合格阈值:</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="4" column="2">
+                  <widget class="QPushButton" name="pushButton_9">
+                   <property name="minimumSize">
+                    <size>
+                     <width>0</width>
+                     <height>50</height>
+                    </size>
+                   </property>
+                   <property name="text">
+                    <string>设置</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="2" column="1">
+                  <widget class="QSpinBox" name="spinBox">
+                   <property name="minimumSize">
+                    <size>
+                     <width>0</width>
+                     <height>50</height>
+                    </size>
+                   </property>
+                   <property name="maximum">
+                    <number>1500</number>
+                   </property>
+                   <property name="value">
+                    <number>128</number>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="1" column="2">
+                  <widget class="QPushButton" name="pushButton_3">
+                   <property name="minimumSize">
+                    <size>
+                     <width>0</width>
+                     <height>50</height>
+                    </size>
+                   </property>
+                   <property name="text">
+                    <string>设置</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="4" column="1">
                   <widget class="QComboBox" name="comboBox_2">
                    <property name="minimumSize">
                     <size>
@@ -1248,53 +1331,10 @@
                    </item>
                   </widget>
                  </item>
-                 <item row="3" column="2">
-                  <widget class="QPushButton" name="pushButton_9">
-                   <property name="minimumSize">
-                    <size>
-                     <width>0</width>
-                     <height>50</height>
-                    </size>
-                   </property>
-                   <property name="text">
-                    <string>设置</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="2" column="0">
-                  <widget class="QLabel" name="label_19">
-                   <property name="text">
-                    <string>相机曝光</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="1" column="0">
-                  <widget class="QLabel" name="label_4">
-                   <property name="text">
-                    <string>图像合格阈值:</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="3" column="0">
+                 <item row="4" column="0">
                   <widget class="QLabel" name="label_27">
                    <property name="text">
                     <string>图像旋转:</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="2" column="1">
-                  <widget class="QSpinBox" name="spinBox">
-                   <property name="minimumSize">
-                    <size>
-                     <width>0</width>
-                     <height>50</height>
-                    </size>
-                   </property>
-                   <property name="maximum">
-                    <number>1500</number>
-                   </property>
-                   <property name="value">
-                    <number>128</number>
                    </property>
                   </widget>
                  </item>
@@ -1324,8 +1364,41 @@
                    </property>
                   </widget>
                  </item>
-                 <item row="1" column="2">
-                  <widget class="QPushButton" name="pushButton_3">
+                 <item row="2" column="0">
+                  <widget class="QLabel" name="label_19">
+                   <property name="text">
+                    <string>相机曝光</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="3" column="0">
+                  <widget class="QLabel" name="label_16">
+                   <property name="text">
+                    <string>相机增益</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="3" column="1">
+                  <widget class="QLineEdit" name="lineEdit_14">
+                   <property name="sizePolicy">
+                    <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
+                     <horstretch>0</horstretch>
+                     <verstretch>0</verstretch>
+                    </sizepolicy>
+                   </property>
+                   <property name="minimumSize">
+                    <size>
+                     <width>0</width>
+                     <height>50</height>
+                    </size>
+                   </property>
+                   <property name="text">
+                    <string>0</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="3" column="2">
+                  <widget class="QPushButton" name="pushButton_12">
                    <property name="minimumSize">
                     <size>
                      <width>0</width>
@@ -1599,7 +1672,7 @@
                <x>0</x>
                <y>0</y>
                <width>586</width>
-               <height>713</height>
+               <height>717</height>
               </rect>
              </property>
              <property name="styleSheet">
