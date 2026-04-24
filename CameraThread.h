@@ -20,6 +20,8 @@
 #include <opencv2/highgui.hpp>
 #include "cmvcamera.h"
 #include "Zhuizong.h"
+#include "TrackingPoseMatcher.h"
+#include "TrackingTypes.h"
 
 using namespace cv;
 
@@ -70,7 +72,7 @@ public:
     void requestStop();
 
     // 🔥 新增：设置预设框
-    void setPresetBoxes(const cv::Rect2d& detBox, const cv::Rect2d& trackBox);
+    void setPresetBoxes(const std::vector<cv::Point2f>& datePoly, const cv::Rect2d& trackBox);
 
     // 🔥 新增：清除预设框
     void clearPresetBoxes();
@@ -79,7 +81,7 @@ public:
     void setPreloadedTemplate(const cv::Mat& tpl) {
         if (!tpl.empty()) {
             m_trackingTemplate = tpl.clone();
-            tracking = true; // 拥有模板后，直接跳过首帧抠图，进入追踪模式
+            tracking = m_poseMatcher.init(m_trackingTemplate);
         }
     }
 
@@ -102,7 +104,7 @@ public slots:
 
     /**
      * @brief 接收图像颜色通道设置
-     * @param a 颜色通道 (0:彩色通道, 1:红色通道, 2:绿色通道, 3:蓝色通道)
+     * @param a 颜色通道 (0:彩色通道, 1:彩色通道, 2:彩色通道, 3:彩色通道)
      */
     void receivecolorchannel(int c);
 
@@ -140,17 +142,16 @@ signals:
     /**
      * @brief 发送检测框进行检测
      * @param image 图像Mat指针
-     * @param bbox 检测框区域
+     * @param pose 当前检测姿态
      */
-    void signal_sendForDetection(cv::Mat image, cv::Rect2d bbox);
+    void signal_sendForDetection(cv::Mat image, DetectionPose pose);
 
     /**
      * @brief 清除标签信号
      */
     void signal_cleanlabel();
 
-    // 🔥 识别框发送信号
-    void signal_boxesSelected(cv::Rect2d detectionBox, cv::Rect2d trackingBox);
+    void signal_boxesSelected(DetectionPose pose);
 
 private:
     // ========== 相机相关 ==========
@@ -165,6 +166,7 @@ private:
     std::unique_ptr<Zhuizong> zhuizong;  ///< 跟踪辅助工具对象
     std::vector<cv::Scalar> colors;      ///< 框的颜色列表
     cv::Mat m_trackingTemplate;
+    TrackingPoseMatcher m_poseMatcher;
 
     // ========== 配置参数 ==========
     int angle2 = 0;  ///< 图像旋转角度 (默认0，不旋转)
@@ -174,7 +176,7 @@ private:
     std::chrono::steady_clock::time_point lastDetectionTime;  ///< 上次检测时间点
 
     // 🔥 新增：预设框相关成员
-    cv::Rect2d presetDetectionBox;   // 预设的检测框
+    std::vector<cv::Point2f> presetDatePoly;   // 预设的生产日期相对多边形
     cv::Rect2d presetTrackingBox;    // 预设的跟踪框
     bool usePresetBoxes;              // 是否使用预设框
 };

@@ -10,6 +10,9 @@ struct CalibrationData {
     // 钢印区域多边形，存储的是相对于“拉环中心”的相对偏移量 (dx, dy)
     std::vector<cv::Point2f> stamp_poly;
 
+    // 生产日期多边形，存储的是相对于“追踪锚点框中心”的相对偏移量 (dx, dy)
+    std::vector<cv::Point2f> date_poly;
+
     // 从本地 YAML 配置文件中反序列化加载这些数据
     bool load(const std::string& yamlPath);
 };
@@ -52,7 +55,10 @@ public:
      * @param diffbox 外部 UI 传进来的生产日期识别框区域
      * @return DetectResult 返回结果包体
      */
-    DetectResult processImage(const cv::Mat& bgrImage, const cv::Rect2d& diffbox);
+    DetectResult processImage(const cv::Mat& bgrImage, const std::vector<cv::Point>& datePoly);
+
+    // 获取生产日期的相对多边形坐标
+    std::vector<cv::Point2f> getDatePoly() const { return calibData.date_poly; }
 
 private:
     cv::Mat templateRing;

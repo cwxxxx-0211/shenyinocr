@@ -1,4 +1,4 @@
-﻿#include "imagelabel.h"
+#include "imagelabel.h"
 #include <QPainter>
 #include <QPen>
 
@@ -69,11 +69,11 @@ bool ImageLabel::isDrawing() const { return drawing; }
 void ImageLabel::resetDrawingStep() {
     m_currentStep = STEP_TRACKING;
     m_trackingRect = QRect();
-    m_detectionRect = QRect();
+    m_detectionPoly.clear();
     selectionRect = QRect();
     m_isInteracting = false;
     update();
-    emit signal_hintMessage("第一步：请【按住左键】框选固定的特征(锚点)");
+    emit signal_hintMessage(QStringLiteral("\u7b2c\u4e00\u6b65\uFF1A\u8BF7\u3010\u6309\u4F4F\u5DE6\u952E\u62D6\u52A8\u3011\u6846\u9009\u56FA\u5B9A\u7684\u7279\u5F81(\u951A\u70B9)"));
 }
 
 void ImageLabel::clearSelection() {
@@ -84,57 +84,56 @@ void ImageLabel::clearSelection() {
 }
 
 void ImageLabel::mousePressEvent(QMouseEvent *event) {
-    if (event->button() == Qt::LeftButton) {
-        if (m_currentStep == STEP_DONE) {
-            resetDrawingStep();
-        }
-        m_isInteracting = true;
-        m_startPoint = event->pos();
+    if (m_currentStep == STEP_DONE && event->button() == Qt::LeftButton) {
+        resetDrawingStep();
+    }
 
-        if (m_currentStep == STEP_TRACKING) {
+    if (m_currentStep == STEP_TRACKING) {
+        if (event->button() == Qt::LeftButton) {
+            m_isInteracting = true;
+            m_startPoint = event->pos();
             m_trackingRect = QRect(m_startPoint, m_startPoint);
-        } else if (m_currentStep == STEP_DETECTION) {
-            m_detectionRect = QRect(m_startPoint, m_startPoint);
+        }
+    } else if (m_currentStep == STEP_DETECTION_POLY) {
+        if (event->button() == Qt::LeftButton) {
+            m_detectionPoly << event->pos();
+            m_tempPolyPoint = event->pos();
+            update();
+        } else if (event->button() == Qt::RightButton) {
+            if (m_detectionPoly.size() >= 3) {
+                m_currentStep = STEP_DONE;
+                emit signal_hintMessage(QStringLiteral("\u591A\u8FB9\u5F62\u5DF2\u95ED\u5408\uFF01\u8BF7\u70B9\u51FB\u53F3\u4FA7\u3010\u4FDD\u5B58\u6A21\u677F\u3011"));
+            } else {
+                emit signal_hintMessage(QStringLiteral("\u591A\u8FB9\u5F62\u9876\u70B9\u592A\u5C11\uFF0C\u8BF7\u7EE7\u7EED\u70B9\u51FB\u5DE6\u952E\uFF01"));
+            }
+            update();
         }
     }
     emit mousePressed(event);
 }
 
 void ImageLabel::mouseMoveEvent(QMouseEvent *event) {
-    if (m_isInteracting) {
-        if (m_currentStep == STEP_TRACKING) {
-            m_trackingRect.setBottomRight(event->pos());
-        } else if (m_currentStep == STEP_DETECTION) {
-            m_detectionRect.setBottomRight(event->pos());
-        }
+    if (m_currentStep == STEP_TRACKING && m_isInteracting) {
+        m_trackingRect.setBottomRight(event->pos());
+        update();
+    } else if (m_currentStep == STEP_DETECTION_POLY) {
+        m_tempPolyPoint = event->pos();
         update();
     }
     emit mouseMoved(event);
 }
 
 void ImageLabel::mouseReleaseEvent(QMouseEvent *event) {
-    if (event->button() == Qt::LeftButton && m_isInteracting) {
+    if (m_currentStep == STEP_TRACKING && event->button() == Qt::LeftButton && m_isInteracting) {
         m_isInteracting = false;
-
-        if (m_currentStep == STEP_TRACKING) {
-            m_trackingRect = m_trackingRect.normalized();
-            if (m_trackingRect.width() > 5) {
-                m_currentStep = STEP_DETECTION;
-                emit signal_hintMessage("锚点选好了！第二步：请继续【按住左键】框选变动的日期区域");
-            } else {
-                m_trackingRect = QRect();
-                emit signal_hintMessage("框太小！请重新【按住左键】框选锚点");
-            }
-        } else if (m_currentStep == STEP_DETECTION) {
-            m_detectionRect = m_detectionRect.normalized();
-            if (m_detectionRect.width() > 5) {
-                m_currentStep = STEP_DONE;
-                selectionRect = m_detectionRect;
-                emit signal_hintMessage("双框已就绪！请点击右侧【保存模板】");
-            } else {
-                m_detectionRect = QRect();
-                emit signal_hintMessage("框太小！请重新【按住左键】框选日期");
-            }
+        m_trackingRect = m_trackingRect.normalized();
+        if (m_trackingRect.width() > 5) {
+            m_currentStep = STEP_DETECTION_POLY;
+            m_detectionPoly.clear();
+            emit signal_hintMessage(QStringLiteral("\u951A\u70B9\u9009\u597D\u4E86\uFF01\u7B2C\u4E8C\u6B65\uFF1A\u8BF7\u3010\u8FDE\u7EED\u70B9\u51FB\u5DE6\u952E\u3011\u63CF\u7ED8\u5B8C\u6574\u7684\u65E5\u671F\u8FB9\u7F18\uFF0C\u3010\u53F3\u952E\u3011\u5B8C\u6210\u95ED\u5408"));
+        } else {
+            m_trackingRect = QRect();
+            emit signal_hintMessage(QStringLiteral("\u6846\u592A\u5C0F\uFF01\u8BF7\u91CD\u65B0\u3010\u6309\u4F4F\u5DE6\u952E\u3011\u6846\u9009\u951A\u70B9"));
         }
         update();
     }
@@ -158,15 +157,31 @@ void ImageLabel::paintEvent(QPaintEvent *event) {
         painter.drawRect(cr.rect);
     }
 
-    // 画追踪框 (仅显示纯净的蓝色粗框，去除文字避免乱码或遮挡)
+    // 画追踪框 (蓝色粗框)
     if (!m_trackingRect.isNull()) {
         painter.setPen(QPen(Qt::blue, 3, Qt::SolidLine));
         painter.drawRect(m_trackingRect);
     }
 
-    // 画检测框 (仅显示纯净的绿色粗框，去除文字避免乱码或遮挡)
-    if (!m_detectionRect.isNull()) {
+    // 画生产日期多边形 (绿色)
+    if (!m_detectionPoly.isEmpty()) {
         painter.setPen(QPen(Qt::green, 3, Qt::SolidLine));
-        painter.drawRect(m_detectionRect);
+        painter.drawPolyline(m_detectionPoly);
+
+        // 如果还没画完，画一根跟随鼠标的虚线
+        if (m_currentStep == STEP_DETECTION_POLY) {
+            painter.setPen(QPen(Qt::green, 2, Qt::DashLine));
+            painter.drawLine(m_detectionPoly.last(), m_tempPolyPoint);
+            painter.drawLine(m_tempPolyPoint, m_detectionPoly.first()); // 闭合预览
+        } else if (m_currentStep == STEP_DONE) {
+            painter.setPen(QPen(Qt::green, 3, Qt::SolidLine));
+            painter.drawPolygon(m_detectionPoly); // 闭合
+        }
+        
+        // 画顶点圆圈
+        painter.setBrush(Qt::green);
+        for (const QPoint& pt : m_detectionPoly) {
+            painter.drawEllipse(pt, 4, 4);
+        }
     }
 }

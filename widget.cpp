@@ -56,6 +56,7 @@
 
 // 标准库
 #include <windows.h>
+#include <algorithm>
 #include <iostream>
 #include <memory>
 #include <queue>
@@ -222,16 +223,139 @@ static cv::Rect getQuickRectROI(const cv::Mat& img, const std::string& windowTit
 
 
 struct CVDrawResult {
-    cv::Rect rect;
+    std::vector<cv::Point> poly;
     double score;
 };
 static std::vector<CVDrawResult> g_lastDrawResults;
-static cv::Rect g_lastRoi;
+static DetectionPose g_lastPose;
 static qint64 g_lastDetectTime = 0;
 
 // ============ 新增：用于绘制钢印的数据缓存 ============
 static std::vector<cv::Point> g_lastStampPoly; // 保存钢印的多边形坐标
 static bool g_lastStampIsOverlap = false;      // 记录钢印是否发生重叠
+
+static cv::Point2f transformPoint(const cv::Mat& affine, const cv::Point2f& pt)
+{
+    return cv::Point2f(
+        static_cast<float>(affine.at<double>(0, 0) * pt.x + affine.at<double>(0, 1) * pt.y + affine.at<double>(0, 2)),
+        static_cast<float>(affine.at<double>(1, 0) * pt.x + affine.at<double>(1, 1) * pt.y + affine.at<double>(1, 2))
+    );
+}
+
+static std::vector<cv::Point> transformPolygon(const std::vector<cv::Point>& poly, const cv::Mat& affine)
+{
+    std::vector<cv::Point> transformed;
+    transformed.reserve(poly.size());
+    for (const auto& pt : poly) {
+        const cv::Point2f mapped = transformPoint(affine, cv::Point2f(static_cast<float>(pt.x), static_cast<float>(pt.y)));
+        transformed.emplace_back(cvRound(mapped.x), cvRound(mapped.y));
+    }
+    return transformed;
+}
+
+static cv::Rect expandAndClampRect(const cv::Rect& rect, int padding, const cv::Size& bounds)
+{
+    cv::Rect expanded(rect.x - padding,
+                      rect.y - padding,
+                      rect.width + padding * 2,
+                      rect.height + padding * 2);
+    return expanded & cv::Rect(0, 0, bounds.width, bounds.height);
+}
+
+static cv::Point getPolygonTopCenter(const std::vector<cv::Point>& poly)
+{
+    if (poly.empty()) {
+        return cv::Point();
+    }
+    if (poly.size() == 1) {
+        return poly.front();
+    }
+
+    std::vector<cv::Point> sorted = poly;
+    std::sort(sorted.begin(), sorted.end(), [](const cv::Point& lhs, const cv::Point& rhs) {
+        if (lhs.y != rhs.y) {
+            return lhs.y < rhs.y;
+        }
+        return lhs.x < rhs.x;
+    });
+
+    const cv::Point& p1 = sorted[0];
+    const cv::Point& p2 = sorted[1];
+    return cv::Point((p1.x + p2.x) / 2, (p1.y + p2.y) / 2);
+}
+
+static OrientedDateRoi prepareOrientedDateRoi(const cv::Mat& src, const DetectionPose& pose, int padding)
+{
+    OrientedDateRoi oriented;
+    if (src.empty() || !pose.valid || pose.datePoly.size() < 3) {
+        return oriented;
+    }
+
+    oriented.rotationMatrix = cv::getRotationMatrix2D(pose.anchorCenter, -pose.angleDeg, 1.0);
+    cv::invertAffineTransform(oriented.rotationMatrix, oriented.inverseRotationMatrix);
+    cv::warpAffine(src, oriented.rotatedImage, oriented.rotationMatrix, src.size(), cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+
+    oriented.rotatedDatePoly = transformPolygon(pose.datePoly, oriented.rotationMatrix);
+    if (oriented.rotatedDatePoly.size() < 3) {
+        return oriented;
+    }
+
+    oriented.roi = expandAndClampRect(cv::boundingRect(oriented.rotatedDatePoly), padding, oriented.rotatedImage.size());
+    if (oriented.roi.width <= 0 || oriented.roi.height <= 0) {
+        return oriented;
+    }
+
+    oriented.croppedImage = oriented.rotatedImage(oriented.roi).clone();
+    if (oriented.croppedImage.type() != CV_8UC3) {
+        cv::Mat converted;
+        if (oriented.croppedImage.channels() == 1) {
+            cv::cvtColor(oriented.croppedImage, converted, cv::COLOR_GRAY2BGR);
+        } else if (oriented.croppedImage.channels() == 4) {
+            cv::cvtColor(oriented.croppedImage, converted, cv::COLOR_BGRA2BGR);
+        } else {
+            converted = oriented.croppedImage.clone();
+        }
+        oriented.croppedImage = converted;
+    }
+
+    oriented.valid = !oriented.croppedImage.empty();
+    return oriented;
+}
+
+static std::vector<CVDrawResult> mapMatchResultsToOriginal(
+    const std::vector<std::tuple<cv::Rect, double, size_t>>& matchResults,
+    const OrientedDateRoi& oriented,
+    const cv::Size& originalSize)
+{
+    std::vector<CVDrawResult> mapped;
+    mapped.reserve(matchResults.size());
+
+    for (const auto& match : matchResults) {
+        cv::Rect rect = std::get<0>(match);
+        rect.x += oriented.roi.x;
+        rect.y += oriented.roi.y;
+
+        const std::vector<cv::Point> rectPoly = {
+            cv::Point(rect.x, rect.y),
+            cv::Point(rect.x + rect.width, rect.y),
+            cv::Point(rect.x + rect.width, rect.y + rect.height),
+            cv::Point(rect.x, rect.y + rect.height)
+        };
+        std::vector<cv::Point> mappedPoly = transformPolygon(rectPoly, oriented.inverseRotationMatrix);
+        cv::Rect mappedBounds = cv::boundingRect(mappedPoly) &
+                                cv::Rect(0, 0, originalSize.width, originalSize.height);
+        if (mappedBounds.width <= 0 || mappedBounds.height <= 0) {
+            continue;
+        }
+
+        CVDrawResult drawResult;
+        drawResult.poly = std::move(mappedPoly);
+        drawResult.score = std::get<1>(match);
+        mapped.push_back(drawResult);
+    }
+
+    return mapped;
+}
 
 /**
  * @brief Widget构造函数
@@ -263,6 +387,8 @@ Widget::Widget(QWidget *parent)
     qRegisterMetaType<cv::Mat>("cv::Mat");
     qRegisterMetaType<cv::Mat *>("cv::Mat*");
     qRegisterMetaType<cv::Rect2d>("cv::Rect2d");
+    qRegisterMetaType<std::vector<cv::Point>>("std::vector<cv::Point>");
+    qRegisterMetaType<DetectionPose>("DetectionPose");
     qRegisterMetaType<QString>("QString");
 
     // 初始化追踪对象（使用智能指针）
@@ -273,10 +399,12 @@ Widget::Widget(QWidget *parent)
 
     // 初始化窗口组件
     initWidget();
+    qDebug() << "1. initWidget执行完毕 (PLC尝试连接完成)";
 
     // 加载OCR配置文件
     config = new OCRConfig("config1.txt");
     config->PrintConfigInfo();
+    qDebug() << "2. config.txt 读取完毕";
 
     // 初始化检测器（DBNet模型）
     det = new DBDetector(config->det_model_dir, config->use_gpu, config->gpu_id,
@@ -284,6 +412,7 @@ Widget::Widget(QWidget *parent)
                          config->use_mkldnn, config->max_side_len, config->det_db_thresh,
                          config->det_db_box_thresh, config->det_db_unclip_ratio,
                          config->visualize, config->use_tensorrt, config->use_fp16);
+    qDebug() << "3. DBDetector 模型加载完毕";
 
     // 初始化分类器（角度分类）
     if (config->use_angle_cls == true)
@@ -292,6 +421,7 @@ Widget::Widget(QWidget *parent)
                              config->gpu_mem, config->cpu_math_library_num_threads,
                              config->use_mkldnn, config->cls_thresh,
                              config->use_tensorrt, config->use_fp16);
+        qDebug() << "4. Classifier 角度分类模型加载完毕";
     }
 
     // 初始化识别器（CRNN模型）
@@ -299,11 +429,12 @@ Widget::Widget(QWidget *parent)
                              config->gpu_mem, config->cpu_math_library_num_threads,
                              config->use_mkldnn, config->char_list_file,
                              config->use_tensorrt, config->use_fp16);
+    qDebug() << "5. CRNNRecognizer 模型加载完毕";
 
     // 初始化统计变量
     hasValidBoxes = false;
-    savedDetectionBox = cv::Rect2d(0, 0, 0, 0);
     savedTrackingBox = cv::Rect2d(0, 0, 0, 0);
+    savedDatePoly.clear();
     recognitionCompletedFlag = false;
     isCollecting = false;
     totalImages = 0;
@@ -314,17 +445,34 @@ Widget::Widget(QWidget *parent)
     // 设置文本框自动换行
     ui->dateEdit->setWordWrapMode(QTextOption::WordWrap);
 
+    // 禁用焦点滚动调节（防误触）- 遍历全局所有下拉框和数字输入框，一劳永逸
+    QList<QComboBox *> comboBoxes = this->findChildren<QComboBox *>();
+    for (QComboBox *cb : comboBoxes) {
+        cb->installEventFilter(this);
+    }
+    QList<QAbstractSpinBox *> spinBoxes = this->findChildren<QAbstractSpinBox *>();
+    for (QAbstractSpinBox *sb : spinBoxes) {
+        sb->installEventFilter(this);
+    }
+
     // 连接定时器信号
     connect(timer, &QTimer::timeout, this, &Widget::rightremove);
 
     connect(imageLabel, &ImageLabel::signal_hintMessage, this, [this](QString msg){
             ui->statusLabel->setText(msg);
+            // ui->statusLabel->setStyleSheet("QLabel{color:#2ecc71; font-weight:bold;}"); // 可选：加上这行可以让字体变绿色加粗更醒目
         });
+    qDebug() << "6. 变量初始化与信号连接完毕";
 
     // 设置默认值并加载保存的设置
     setupDefaultValues();
+    qDebug() << "7. setupDefaultValues 执行完毕";
+
     loadSettings();
+    qDebug() << "8. loadSettings 执行完毕";
+
     loadLastTemplateConfig(); // 加载模板图像
+    qDebug() << "9. loadLastTemplateConfig 执行完毕 (Widget构造结束!)";
 }
 
 /**
@@ -422,13 +570,13 @@ void Widget::initWidget()
     }, Qt::QueuedConnection);
 
     // 连接线程信号槽 - 图像检测（根据检测模式选择不同的处理函数）
-    QObject::connect(myThread, &MyThread::signal_sendForDetection, this, [this](cv::Mat img, Rect2d rect) {
+    QObject::connect(myThread, &MyThread::signal_sendForDetection, this, [this](cv::Mat img, DetectionPose pose) {
         if (ui->comboBox_4->currentIndex() == 2) {
-            this->slot_readAndDetect(&img, rect);
+            this->slot_readAndDetect(&img, pose);
         } else if(ui->comboBox_4->currentIndex() == 0) {
-            this->slot_readAndDetect3(&img, rect);
+            this->slot_readAndDetect3(&img, pose);
         } else if(ui->comboBox_4->currentIndex() == 1){
-            this->slot_readAndDetect4(&img, rect);
+            this->slot_readAndDetect4(&img, pose);
         }
     });
 
@@ -968,9 +1116,11 @@ void Widget::slot_displayAndDetect(cv::Mat *image)
         return;
     }
 
-    // 3. 核心重绘机制：只要在检测有效期内（2000毫秒），把识别结果强行画在图像上！
-    qint64 now = QDateTime::currentMSecsSinceEpoch();
-    if (now - g_lastDetectTime < 2000 ) {
+    // 3. 核心重绘机制：只要缓存里还有上一轮检测结果，就持续绘制，直到被新结果覆盖或主动清空。
+    if (!g_lastDrawResults.empty() ||
+        !g_lastPose.trackingPoly.empty() ||
+        !g_lastPose.datePoly.empty() ||
+        !g_lastStampPoly.empty()) {
 
         // 动态计算自适应比例
         double dynamicScale = std::max(1.0, displayImg.rows / 800.0);
@@ -981,12 +1131,13 @@ void Widget::slot_displayAndDetect(cv::Mat *image)
         int textThickness = std::max(1, static_cast<int>(1.5 * dynamicScale));
 
         for (const auto& res : g_lastDrawResults) {
-            cv::Rect rect = res.rect;
-            rect.x += g_lastRoi.x; // 绝对坐标映射还原
-            rect.y += g_lastRoi.y;
+            if (res.poly.size() < 4) {
+                continue;
+            }
 
             // 画字符绿框
-            cv::rectangle(displayImg, rect, cv::Scalar(0, 255, 0), boxThickness);
+            std::vector<std::vector<cv::Point>> charPolys = {res.poly};
+            cv::polylines(displayImg, charPolys, true, cv::Scalar(0, 255, 0), boxThickness);
 
             // 分数大于等于0才显示数字 (带描边显示)
             if (res.score >= 0) {
@@ -994,15 +1145,26 @@ void Widget::slot_displayAndDetect(cv::Mat *image)
                 int baseline = 0;
                 cv::Size textSize = cv::getTextSize(scoreText, cv::FONT_HERSHEY_SIMPLEX, fontScale, textThickness, &baseline);
 
-                cv::Point boxCenter(rect.x + rect.width / 2, rect.y);
-                int textX = std::max(0, std::min(boxCenter.x - textSize.width / 2, displayImg.cols - textSize.width));
-                int textY = std::max(textSize.height, std::min(boxCenter.y - 5, displayImg.rows));
+                cv::Point textAnchor = getPolygonTopCenter(res.poly);
+                int textX = std::max(0, std::min(textAnchor.x - textSize.width / 2, displayImg.cols - textSize.width));
+                int textY = std::max(textSize.height, std::min(textAnchor.y - 5, displayImg.rows));
 
                 cv::putText(displayImg, scoreText, cv::Point(textX, textY),
                     cv::FONT_HERSHEY_SIMPLEX, fontScale, cv::Scalar(0, 0, 0), textThickness + 2);
                 cv::putText(displayImg, scoreText, cv::Point(textX, textY),
                     cv::FONT_HERSHEY_SIMPLEX, fontScale, cv::Scalar(0, 255, 255), textThickness);
             }
+        }
+
+        if (!g_lastPose.trackingPoly.empty()) {
+            std::vector<std::vector<cv::Point>> trackingPolys = {g_lastPose.trackingPoly};
+            cv::polylines(displayImg, trackingPolys, true, cv::Scalar(255, 0, 0), boxThickness);
+        }
+
+        // ================== 绘制生产日期多边形 ==================
+        if (!g_lastPose.datePoly.empty()) {
+            std::vector<std::vector<cv::Point>> datePolys = {g_lastPose.datePoly};
+            cv::polylines(displayImg, datePolys, true, cv::Scalar(0, 255, 0), boxThickness);
         }
 
         // ================== 绘制钢印多边形 ==================
@@ -1037,7 +1199,7 @@ void Widget::slot_displayAndDetect(cv::Mat *image)
  * @param diffbox 检测区域
  * @details 使用PaddleOCR进行文字识别，支持中英文、数字识别
  */
-void Widget::slot_readAndDetect(cv::Mat *image, Rect2d diffbox)
+void Widget::slot_readAndDetect(cv::Mat *image, DetectionPose pose)
 {
     // 1. 检查延迟剔除队列
     if (!removalQueue.empty() && totalImages >= removalQueue.front().second - 1)
@@ -1056,9 +1218,6 @@ void Widget::slot_readAndDetect(cv::Mat *image, Rect2d diffbox)
         return;
     }
 
-    cv::Mat croppedImage;
-    // 注：detRect 和 detRect1 相关的 UI 变量已不再需要
-
     // 按周期清理数据，不再清理 imageLabel 的矩形，因为不再绘制
     if (judge)
     {
@@ -1073,31 +1232,18 @@ void Widget::slot_readAndDetect(cv::Mat *image, Rect2d diffbox)
         string1.clear();
     }
 
-    // ================== 1. 精准抠图 (不带白边) ==================
     qDebug() << "----------------- OCR PROCESS START -----------------";
-    cv::Mat safeImage = image->clone();
-
-    cv::Rect roi = cv::Rect(
-                static_cast<int>(diffbox.x),
-                static_cast<int>(diffbox.y),
-                static_cast<int>(diffbox.width),
-                static_cast<int>(diffbox.height)) & cv::Rect(0, 0, safeImage.cols, safeImage.rows);
-
-    if (roi.width <= 0 || roi.height <= 0)
-    {
+    OrientedDateRoi oriented = prepareOrientedDateRoi(*image, pose, 0);
+    if (!oriented.valid) {
         qDebug() << "[OCR_ERROR] Invalid selection area!";
         return;
     }
 
-    croppedImage = safeImage(roi).clone();
-
-    // 统一图像类型
-    if (croppedImage.type() != CV_8UC3)
-    {
-        cv::Mat temp;
-        cv::cvtColor(croppedImage, temp, cv::COLOR_GRAY2BGR);
-        croppedImage = temp;
-    }
+    cv::Mat croppedImage = oriented.croppedImage.clone();
+    g_lastPose = pose;
+    g_lastDrawResults.clear();
+    g_lastStampPoly.clear();
+    g_lastStampIsOverlap = false;
 
     // ================== 2. 执行 OCR 识别 (原生 Run API) ==================
     QString target_qstring = setdatetime();
@@ -1205,7 +1351,7 @@ void Widget::slot_readAndDetect(cv::Mat *image, Rect2d diffbox)
  */
 
 //原始图像版
-void Widget::slot_readAndDetect3(cv::Mat *image, Rect2d diffbox)
+void Widget::slot_readAndDetect3(cv::Mat *image, DetectionPose pose)
 {
     if (!removalQueue.empty() && totalImages >= removalQueue.front().second - 1) {
         qDebug() << "PLC延迟剔除触发，当前总数:" << totalImages;
@@ -1224,28 +1370,14 @@ void Widget::slot_readAndDetect3(cv::Mat *image, Rect2d diffbox)
         detectedRects.clear();
         string1.clear();
     }
-
-    // ===================== 1. 字库匹配 (带有 20 像素 Padding 防止切断) =====================
-    int padding = 20;
-    cv::Rect charRoi(
-        static_cast<int>(diffbox.x) - padding,
-        static_cast<int>(diffbox.y) - padding,
-        static_cast<int>(diffbox.width) + padding * 2,
-        static_cast<int>(diffbox.height) + padding * 2
-    );
-
-    cv::Rect roi = charRoi & cv::Rect(0, 0, image->cols, image->rows);
-    if (roi.width <= 0 || roi.height <= 0) {
+    
+    OrientedDateRoi oriented = prepareOrientedDateRoi(*image, pose, 20);
+    if (!oriented.valid) {
         QMessageBox::warning(this, "警告", "识别区域超出原图范围！");
         return;
     }
 
-    cv::Mat croppedImage = (*image)(roi);
-    if (croppedImage.type() != CV_8UC3) {
-        cv::Mat temp;
-        cv::cvtColor(croppedImage, temp, cv::COLOR_GRAY2BGR);
-        croppedImage = temp;
-    }
+    cv::Mat croppedImage = oriented.croppedImage.clone();
 
     emit imgshibie(&croppedImage);
     ui->imagenum->setText(QString::number(totalImages));
@@ -1268,8 +1400,7 @@ void Widget::slot_readAndDetect3(cv::Mat *image, Rect2d diffbox)
         qDebug() << "[ERROR] Missing overlap config!";
         overlapIsOk = false;
     } else {
-        // 🔥 核心修改：直接传入完全没有 padding 的 diffbox，保证物理位置精准
-        DetectResult overlapRes = overlapDetector.processImage(*image, diffbox);
+        DetectResult overlapRes = overlapDetector.processImage(*image, pose.datePoly);
         overlapIsOk = overlapRes.isOk;
 
         g_lastStampPoly = overlapRes.finalStampPoly;
@@ -1277,16 +1408,8 @@ void Widget::slot_readAndDetect3(cv::Mat *image, Rect2d diffbox)
     }
 
     // ===================== 3. UI 数据更新与画面重绘 =====================
-    g_lastDrawResults.clear();
-    for (const auto& match : templatematch->lastMatchResults) {
-        CVDrawResult res;
-        res.rect = std::get<0>(match);
-        res.score = std::get<1>(match);
-        g_lastDrawResults.push_back(res);
-    }
-
-    // 记录带 padding 的 roi，供 UI 将字库的小绿框准确映射回原图
-    g_lastRoi = roi;
+    g_lastDrawResults = mapMatchResultsToOriginal(templatematch->lastMatchResults, oriented, image->size());
+    g_lastPose = pose;
     g_lastDetectTime = QDateTime::currentMSecsSinceEpoch();
 
     slot_displayAndDetect(image);
@@ -1338,7 +1461,7 @@ void Widget::slot_readAndDetect3(cv::Mat *image, Rect2d diffbox)
  * @param diffbox 检测区域
  * @details 使用字符模板库进行字符数量匹配检测
  */
-void Widget::slot_readAndDetect4(cv::Mat *image, Rect2d diffbox)
+void Widget::slot_readAndDetect4(cv::Mat *image, DetectionPose pose)
 {
     if (!removalQueue.empty() && totalImages >= removalQueue.front().second - 1) {
         wrongremove();
@@ -1357,25 +1480,12 @@ void Widget::slot_readAndDetect4(cv::Mat *image, Rect2d diffbox)
         string1.clear();
     }
 
-    // 🔥 恢复字库匹配的 20 像素 padding，防止字符被切掉一半
-    int padding = 20;
-    cv::Rect charRoi(
-        static_cast<int>(diffbox.x) - padding,
-        static_cast<int>(diffbox.y) - padding,
-        static_cast<int>(diffbox.width) + padding * 2,
-        static_cast<int>(diffbox.height) + padding * 2
-    );
-
-    cv::Rect roi = charRoi & cv::Rect(0, 0, image->cols, image->rows);
-    if (roi.width <= 0 || roi.height <= 0) return;
-
-    cv::Mat croppedImage = (*image)(roi);
-    if (croppedImage.type() != CV_8UC3) {
-        cv::Mat temp;
-        cv::cvtColor(croppedImage, temp, cv::COLOR_GRAY2BGR);
-        croppedImage = temp;
+    OrientedDateRoi oriented = prepareOrientedDateRoi(*image, pose, 20);
+    if (!oriented.valid) {
+        return;
     }
 
+    cv::Mat croppedImage = oriented.croppedImage.clone();
     emit imgshibie(&croppedImage);
     ui->imagenum->setText(QString::number(totalImages));
 
@@ -1389,16 +1499,10 @@ void Widget::slot_readAndDetect4(cv::Mat *image, Rect2d diffbox)
     int detectNum = templatematch->run3(digitTemplates);
     QString judgeResult = (detectNum == targetNum ? "ok" : "no");
 
-    g_lastDrawResults.clear();
-    for (const auto& match : templatematch->lastMatchResults) {
-        CVDrawResult res;
-        res.rect = std::get<0>(match);
-        res.score = std::get<1>(match);
-        g_lastDrawResults.push_back(res);
-    }
-
-    // 记录带 padding 的 roi，供 UI 准确画出绿框
-    g_lastRoi = roi;
+    g_lastDrawResults = mapMatchResultsToOriginal(templatematch->lastMatchResults, oriented, image->size());
+    g_lastPose = pose;
+    g_lastStampPoly.clear();
+    g_lastStampIsOverlap = false;
     g_lastDetectTime = QDateTime::currentMSecsSinceEpoch();
 
     slot_displayAndDetect(image);
@@ -1722,100 +1826,67 @@ void Widget::on_DisconnectpushButton_clicked()
     }
 }
 
-/**
- * @brief 写入拍照时间按钮点击槽函数
- * @details 向PLC DB1.924写入DWORD值（拍照时间）
- */
-void Widget::on_WriteVDpushButton_clicked()
-{
-    if (!client->Connected())
-    {
-        return;
-    }
+///**
+// * @brief 写入延时按钮点击槽函数
+// * @details 向PLC DB1.920写入DWORD值（延时时间）
+// */
+//void Widget::on_WriteVDpushButton_2_clicked()
+//{
+//    if (!client->Connected())
+//    {
+//        return;
+//    }
 
-    uint32_t value = ui->lineEdit_6->text().toUInt();
-    byte v_data[4] = {0};
+//    uint32_t value2 = ui->lineEdit_7->text().toUInt();
+//    byte delay_data[4] = {0};
 
-    // 大小端转换
-    v_data[3] = (unsigned char)(0xFF & value);
-    v_data[2] = (unsigned char)((0xFF00 & value) >> 8);
-    v_data[1] = (unsigned char)((0xFF0000 & value) >> 16);
-    v_data[0] = (unsigned char)((0xFF000000 & value) >> 24);
+//    // 大小端转换
+//    delay_data[3] = (unsigned char)(0xFF & value2);
+//    delay_data[2] = (unsigned char)((0xFF00 & value2) >> 8);
+//    delay_data[1] = (unsigned char)((0xFF0000 & value2) >> 16);
+//    delay_data[0] = (unsigned char)((0xFF000000 & value2) >> 24);
 
-    // 写入DB1.924
-    int tmp = client->WriteArea(S7AreaDB, 1, 924, 4, S7WLDWord, v_data);
-    if (tmp != 0)
-    {
-        QMessageBox::warning(this, "error", "设置失败");
-    }
-    else
-    {
-        QMessageBox::information(this, "success", "设置成功");
-        qDebug() << "paizhaoshijian" << tmp;
-    }
-}
+//    // 写入DB1.920
+//    int tmp2 = client->WriteArea(S7AreaDB, 1, 920, 4, S7WLDWord, delay_data);
+//    if (tmp2 != 0)
+//    {
+//        QMessageBox::warning(this, "error", "设置失败");
+//    }
+//    else
+//    {
+//        QMessageBox::information(this, "success", "设置成功");
+//    }
+//}
 
-/**
- * @brief 写入延时按钮点击槽函数
- * @details 向PLC DB1.920写入DWORD值（延时时间）
- */
-void Widget::on_WriteVDpushButton_2_clicked()
-{
-    if (!client->Connected())
-    {
-        return;
-    }
+///**
+// * @brief 写入延时时间按钮点击槽函数
+// * @details 向PLC DB1.980写入WORD值（延时时间）
+// */
+//void Widget::on_WriteVDpushButton_3_clicked()
+//{
+//    if (!client->Connected())
+//    {
+//        return;
+//    }
 
-    uint32_t value2 = ui->lineEdit_7->text().toUInt();
-    byte delay_data[4] = {0};
+//    uint16_t value4 = ui->lineEdit_8->text().toUInt();
+//    byte delay_time[2] = {0};
 
-    // 大小端转换
-    delay_data[3] = (unsigned char)(0xFF & value2);
-    delay_data[2] = (unsigned char)((0xFF00 & value2) >> 8);
-    delay_data[1] = (unsigned char)((0xFF0000 & value2) >> 16);
-    delay_data[0] = (unsigned char)((0xFF000000 & value2) >> 24);
+//    // 大小端转换
+//    delay_time[1] = (unsigned char)(0xFF & value4);
+//    delay_time[0] = (unsigned char)((0xFF00 & value4) >> 8);
 
-    // 写入DB1.920
-    int tmp2 = client->WriteArea(S7AreaDB, 1, 920, 4, S7WLDWord, delay_data);
-    if (tmp2 != 0)
-    {
-        QMessageBox::warning(this, "error", "设置失败");
-    }
-    else
-    {
-        QMessageBox::information(this, "success", "设置成功");
-    }
-}
-
-/**
- * @brief 写入延时时间按钮点击槽函数
- * @details 向PLC DB1.980写入WORD值（延时时间）
- */
-void Widget::on_WriteVDpushButton_3_clicked()
-{
-    if (!client->Connected())
-    {
-        return;
-    }
-
-    uint16_t value4 = ui->lineEdit_8->text().toUInt();
-    byte delay_time[2] = {0};
-
-    // 大小端转换
-    delay_time[1] = (unsigned char)(0xFF & value4);
-    delay_time[0] = (unsigned char)((0xFF00 & value4) >> 8);
-
-    // 写入DB1.980
-    int tmp4 = client->WriteArea(S7AreaDB, 1, 980, 2, S7WLWord, delay_time);
-    if (tmp4 != 0)
-    {
-        QMessageBox::warning(this, "error", "设置失败");
-    }
-    else
-    {
-        QMessageBox::information(this, "success", "设置成功");
-    }
-}
+//    // 写入DB1.980
+//    int tmp4 = client->WriteArea(S7AreaDB, 1, 980, 2, S7WLWord, delay_time);
+//    if (tmp4 != 0)
+//    {
+//        QMessageBox::warning(this, "error", "设置失败");
+//    }
+//    else
+//    {
+//        QMessageBox::information(this, "success", "设置成功");
+//    }
+//}
 
 /**
  * @brief 写入批次时间按钮点击槽函数
@@ -1823,28 +1894,96 @@ void Widget::on_WriteVDpushButton_3_clicked()
  */
 void Widget::on_pushButton_8_clicked()
 {
-    if (!client->Connected())
-    {
-        return;
-    }
+if (!client->Connected())
+{
+    QMessageBox::warning(this, "警告", "PLC未连接！");
+    return;
+}
 
-    uint16_t value5 = ui->lineEdit_20->text().toUInt();
-    byte pz_time[2] = {0};
+//剔除位置
+wrongindex = ui->lineEdit_12->text().toInt();
+//    QMessageBox::information(this, "提示", "剔除位置设置成功");
 
-    // 大小端转换
-    pz_time[1] = (unsigned char)(0xFF & value5);
-    pz_time[0] = (unsigned char)((0xFF00 & value5) >> 8);
 
-    // 写入DB1.982
-    int tmp4 = client->WriteArea(S7AreaDB, 1, 982, 2, S7WLWord, pz_time);
-    if (tmp4 != 0)
-    {
-        QMessageBox::warning(this, "error", "设置失败");
-    }
-    else
-    {
-        QMessageBox::information(this, "success", "设置成功");
-    }
+//剔除时间
+uint16_t value4 = ui->lineEdit_8->text().toUInt();
+byte delay_time[2] = {0};
+
+// 大小端转换
+delay_time[1] = (unsigned char)(0xFF & value4);
+delay_time[0] = (unsigned char)((0xFF00 & value4) >> 8);
+
+// 写入DB1.980
+int tmp4 = client->WriteArea(S7AreaDB, 1, 980, 2, S7WLWord, delay_time);
+if (tmp4 != 0)
+{
+    QMessageBox::warning(this, "error", "设置剔除时间失败");
+    return;
+}
+
+
+
+//剔除距离
+uint32_t value2 = ui->lineEdit_7->text().toUInt();
+byte delay_data[4] = {0};
+
+// 大小端转换
+delay_data[3] = (unsigned char)(0xFF & value2);
+delay_data[2] = (unsigned char)((0xFF00 & value2) >> 8);
+delay_data[1] = (unsigned char)((0xFF0000 & value2) >> 16);
+delay_data[0] = (unsigned char)((0xFF000000 & value2) >> 24);
+
+// 写入DB1.920
+int tmp2 = client->WriteArea(S7AreaDB, 1, 920, 4, S7WLDWord, delay_data);
+if (tmp2 != 0)
+{
+    QMessageBox::warning(this, "error", "设置剔除距离失败");
+    return;
+}
+
+
+
+
+//拍照时间
+uint16_t value5 = ui->lineEdit_20->text().toUInt();
+byte pz_time[2] = {0};
+
+// 大小端转换
+pz_time[1] = (unsigned char)(0xFF & value5);
+pz_time[0] = (unsigned char)((0xFF00 & value5) >> 8);
+
+// 写入DB1.982
+int tmp5 = client->WriteArea(S7AreaDB, 1, 982, 2, S7WLWord, pz_time);
+if (tmp5 != 0)
+{
+    QMessageBox::warning(this, "error", "设置拍照时间失败");
+    return;
+}
+
+//相机延时
+QString text = ui->lineEdit_4->text();
+emit sendDataTo(text);
+
+//拍照距离
+
+uint32_t value = ui->lineEdit_6->text().toUInt();
+byte v_data[4] = {0};
+
+// 大小端转换
+v_data[3] = (unsigned char)(0xFF & value);
+v_data[2] = (unsigned char)((0xFF00 & value) >> 8);
+v_data[1] = (unsigned char)((0xFF0000 & value) >> 16);
+v_data[0] = (unsigned char)((0xFF000000 & value) >> 24);
+
+// 写入DB1.924
+int tmp = client->WriteArea(S7AreaDB, 1, 924, 4, S7WLDWord, v_data);
+if (tmp != 0)
+{
+    QMessageBox::warning(this, "error", "设置拍照距离失败");
+    return;
+}
+
+QMessageBox::information(this, "提示", "所有设置已经完成！");
 }
 
 /**
@@ -1977,6 +2116,12 @@ void Widget::on_cancel_clicked()
     ui->speedLabel->clear();
     ui->lineBoxIndex_6->clear();
 
+    g_lastDrawResults.clear();
+    g_lastPose = DetectionPose();
+    g_lastStampPoly.clear();
+    g_lastStampIsOverlap = false;
+    g_lastDetectTime = 0;
+
     ngImages = 0;
     totalImages = 0;
     first = false;
@@ -2093,16 +2238,16 @@ void Widget::on_textsure_btn_clicked()
         if (hasMissing) {
             // 如果有任何图片读取失败或丢失，绝不更新到全局的 digitTemplates，同时给出严厉警告
             QMessageBox::critical(this, "严重警告",
-                "以下字符未在文件夹中找到对应图片，或图片读取失败：\n[ " + missingNames + " ]\n\n请检查模板文件夹内的图片是否存在或是否损坏（支持中文，无需关心后缀和大小写）！\n本次更新已撤销。");
+                QString("以下字符未在文件夹中找到对应图片，或图片读取失败：\n[ %1 ]\n\n请检查模板文件夹内的图片是否存在或是否损坏（支持中文，无需关心后缀和大小写）！\n本次更新已撤销。").arg(missingNames));
             return;
         }
 
         // 5. 全部成功后，再更新到全局容器
         digitTemplates = tempTemplates;
-        QMessageBox::information(this, "提示", "目标字符确认成功，共加载 " + QString::number(digitTemplates.size()) + " 个模板！");
+        QMessageBox::information(this, "提示", QString("目标字符确认成功，共加载 %1 个模板！").arg(digitTemplates.size()));
     }
     else{
-     QMessageBox::information(this, "提示", "目标字符确认成功 ");
+     QMessageBox::information(this, "提示", "目标字符确认成功");
     }
 
 
@@ -2172,16 +2317,16 @@ Mat *Widget::QImageToMat(const QImage &image)
     return mat;
 }
 
-/**
- * @brief 延时确定按钮点击槽函数
- * @details 设置相机采集延时
- */
-void Widget::on_delayButton_clicked()
-{
-    QString text = ui->lineEdit_4->text();
-    emit sendDataTo(text);
-    QMessageBox::information(this, "提示", "相机延时设置成功");
-}
+///**
+// * @brief 延时确定按钮点击槽函数
+// * @details 设置相机采集延时
+// */
+//void Widget::on_delayButton_clicked()
+//{
+//    QString text = ui->lineEdit_4->text();
+//    emit sendDataTo(text);
+//    QMessageBox::information(this, "提示", "相机延时设置成功");
+//}
 
 /**
  * @brief 清空结果标签槽函数
@@ -2274,19 +2419,19 @@ void Widget::on_pushButton_5_clicked()
     QDir dir(savePath);
     if (!dir.mkpath(".")) return;
 
-    // 1. 获取双框坐标
+    // 1. 获取标定数据
     QRect uiTrackRect = imageLabel->getTrackingRect();
-    QRect uiDetectRect = imageLabel->getDetectionRect();
+    QPolygon uiDetectPoly = imageLabel->getDetectionPoly();
 
-    if (uiTrackRect.isNull() || uiDetectRect.isNull()) {
-        QMessageBox::warning(this, "警告", "请在图上同时画好【追踪框】和【检测框】！");
+    if (uiTrackRect.isNull() || uiDetectPoly.isEmpty() || uiDetectPoly.size() < 3) {
+        QMessageBox::warning(this, "警告", "请在图上画好【追踪锚点】并闭合【生产日期多边形】！");
         return;
     }
 
     // 2. 转换坐标 (使用局部 clone 确保计算基准稳定)
     cv::Mat calibImg = myImage->clone();
 
-    auto toPhysical = [&](QRect uiRect) -> cv::Rect2d {
+    auto toPhysicalPoint = [&](QPoint uiPt) -> cv::Point2f {
         QSize labelSize = imageLabel->size();
         QSize imgSize(calibImg.cols, calibImg.rows);
         QSize scaledSize = imgSize.scaled(labelSize, Qt::KeepAspectRatio);
@@ -2294,17 +2439,39 @@ void Widget::on_pushButton_5_clicked()
         int yOff = (labelSize.height() - scaledSize.height()) / 2;
         double ratio = (double)imgSize.width() / scaledSize.width();
 
-        cv::Rect2d phys((uiRect.x() - xOff) * ratio, (uiRect.y() - yOff) * ratio,
-                        uiRect.width() * ratio, uiRect.height() * ratio);
+        float px = (uiPt.x() - xOff) * ratio;
+        float py = (uiPt.y() - yOff) * ratio;
+        return cv::Point2f(px, py);
+    };
+
+    auto toPhysicalRect = [&](QRect uiRect) -> cv::Rect2d {
+        cv::Point2f tl = toPhysicalPoint(uiRect.topLeft());
+        cv::Point2f br = toPhysicalPoint(uiRect.bottomRight());
+        cv::Rect2d phys(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+        
         phys.x = std::max(0.0, phys.x);
         phys.y = std::max(0.0, phys.y);
-        if (phys.x + phys.width > imgSize.width()) phys.width = imgSize.width() - phys.x;
-        if (phys.y + phys.height > imgSize.height()) phys.height = imgSize.height() - phys.y;
+        if (phys.x + phys.width > calibImg.cols) phys.width = calibImg.cols - phys.x;
+        if (phys.y + phys.height > calibImg.rows) phys.height = calibImg.rows - phys.y;
         return phys;
     };
 
-    savedTrackingBox = toPhysical(uiTrackRect);
-    savedDetectionBox = toPhysical(uiDetectRect);
+    savedTrackingBox = toPhysicalRect(uiTrackRect);
+    
+    // 计算多边形的绝对物理坐标，并存入 YAML 相对坐标 (相对于追踪框中心)
+    std::vector<cv::Point2f> absDatePoly;
+    for (const QPoint& pt : uiDetectPoly) {
+        absDatePoly.push_back(toPhysicalPoint(pt));
+    }
+    
+    cv::Point2f trackCenter(savedTrackingBox.x + savedTrackingBox.width / 2.0, 
+                            savedTrackingBox.y + savedTrackingBox.height / 2.0);
+                            
+    std::vector<cv::Point2f> relDatePoly;
+    for (const auto& pt : absDatePoly) {
+        relDatePoly.push_back(cv::Point2f(pt.x - trackCenter.x, pt.y - trackCenter.y));
+    }
+    savedDatePoly = relDatePoly;
     hasValidBoxes = true;
 
     // 3. 物理保存
@@ -2314,6 +2481,13 @@ void Widget::on_pushButton_5_clicked()
     m_loadedTrackingTemplate = tplImg.clone();
 
     currentTemplateDirPath = savePath;
+
+    QString yamlPath = savePath + "/calibrate_config.yaml";
+    {
+        cv::FileStorage fs(yamlPath.toLocal8Bit().toStdString(), cv::FileStorage::WRITE);
+        fs << "date_poly" << relDatePoly;
+        fs.release();
+    }
 
     // 4. 特征标定 (仅模式 0)
     if (ui->comboBox_4->currentIndex() == 0) {
@@ -2338,9 +2512,9 @@ void Widget::on_pushButton_5_clicked()
                     relStamp.push_back(cv::Point2f(pt.x - cRing.x, pt.y - cRing.y));
                 }
 
-                QString yamlPath = savePath + "/calibrate_config.yaml";
                 cv::FileStorage fs(yamlPath.toLocal8Bit().toStdString(), cv::FileStorage::WRITE);
                 fs << "stamp_poly" << relStamp;
+                fs << "date_poly" << relDatePoly;
                 fs.release();
 
                 // 重新初始化检测引擎
@@ -2369,6 +2543,7 @@ void Widget::saveSettingsToDir(const QString &dirPath)
 
     // 保存所有参数（与原逻辑一致，只是路径改为指定文件夹）
     settings.setValue("spinbox_value", ui->spinBox->text());
+    settings.setValue("lineEdit_14_value", ui->lineEdit_14->text()); // 相机增益
     settings.setValue("lineEdit_6_value", ui->lineEdit_6->text());
     settings.setValue("lineEdit_7_value", ui->lineEdit_7->text());
     settings.setValue("lineEdit_8_value", ui->lineEdit_8->text());
@@ -2392,11 +2567,6 @@ void Widget::saveSettingsToDir(const QString &dirPath)
 
     // 🔥 新增：保存框坐标
     if (hasValidBoxes) {
-        settings.setValue("detectionBox_x", savedDetectionBox.x);
-        settings.setValue("detectionBox_y", savedDetectionBox.y);
-        settings.setValue("detectionBox_width", savedDetectionBox.width);
-        settings.setValue("detectionBox_height", savedDetectionBox.height);
-
         settings.setValue("trackingBox_x", savedTrackingBox.x);
         settings.setValue("trackingBox_y", savedTrackingBox.y);
         settings.setValue("trackingBox_width", savedTrackingBox.width);
@@ -2432,12 +2602,16 @@ void Widget::initOverlapDetectorFromCurrentDir() {
 
     if (ringInfo.exists() && yamlInfo.exists()) {
         // 使用 toLocal8Bit().toStdString() 以支持 Windows 下的本地编码路径
-        bool ok = overlapDetector.init(ringPath.toLocal8Bit().toStdString(),
-                                       yamlPath.toLocal8Bit().toStdString());
-        if (!ok) {
-            qDebug() << "[ERROR] overlapDetector.init returned FALSE. Check if BMP is corrupted.";
-        } else {
-            qDebug() << "[SUCCESS] Overlap Engine is initialized and ready.";
+        try {
+            bool ok = overlapDetector.init(ringPath.toLocal8Bit().toStdString(),
+                                           yamlPath.toLocal8Bit().toStdString());
+            if (!ok) {
+                qDebug() << "[ERROR] overlapDetector.init returned FALSE. Check if BMP is corrupted.";
+            } else {
+                qDebug() << "[SUCCESS] Overlap Engine is initialized and ready.";
+            }
+        } catch (...) {
+            qDebug() << "[致命错误] overlapDetector.init 内部发生 C++ 崩溃！可能是 OpenCV 异常或 YAML 解析错误！";
         }
     } else {
         qDebug() << "[ERROR] Cannot start engine: One or more files missing on disk.";
@@ -2471,6 +2645,7 @@ void Widget::on_pushButton_4_clicked()
     //判断plc是否连接
     if (!client->Connected())
     {
+        QMessageBox::warning(this, "警告", "PLC未连接！");
         return;
     }
 
@@ -2611,6 +2786,7 @@ void Widget::loadSettingsFromDir(const QString &dirPath)
     QSettings settings(settingsFilePath, QSettings::IniFormat); // 对应保存时的INI格式
 
     if (settings.contains("spinbox_value")) ui->spinBox->setValue(settings.value("spinbox_value").toInt());
+    if (settings.contains("lineEdit_14_value")) ui->lineEdit_14->setText(settings.value("lineEdit_14_value").toString()); // 初始化增益显示
     if (settings.contains("lineEdit_6_value")) ui->lineEdit_6->setText(settings.value("lineEdit_6_value").toString());
     if (settings.contains("lineEdit_7_value")) ui->lineEdit_7->setText(settings.value("lineEdit_7_value").toString());
     if (settings.contains("lineEdit_8_value")) ui->lineEdit_8->setText(settings.value("lineEdit_8_value").toString());
@@ -2657,11 +2833,6 @@ void Widget::loadSettingsFromDir(const QString &dirPath)
 
     // 🔥 加载双框坐标
     if (settings.contains("hasValidBoxes") && settings.value("hasValidBoxes").toBool()) {
-        savedDetectionBox.x = settings.value("detectionBox_x", 0).toDouble();
-        savedDetectionBox.y = settings.value("detectionBox_y", 0).toDouble();
-        savedDetectionBox.width = settings.value("detectionBox_width", 0).toDouble();
-        savedDetectionBox.height = settings.value("detectionBox_height", 0).toDouble();
-
         savedTrackingBox.x = settings.value("trackingBox_x", 0).toDouble();
         savedTrackingBox.y = settings.value("trackingBox_y", 0).toDouble();
         savedTrackingBox.width = settings.value("trackingBox_width", 0).toDouble();
@@ -2682,6 +2853,15 @@ void Widget::loadSettingsFromDir(const QString &dirPath)
     } else {
         qDebug() << "警告：未找到 tracking_template.bmp";
     }
+
+    savedDatePoly.clear();
+    QString yamlPath = dirPath + "/calibrate_config.yaml";
+    if (QFile::exists(yamlPath)) {
+        CalibrationData calib;
+        if (calib.load(yamlPath.toLocal8Bit().toStdString())) {
+            savedDatePoly = calib.date_poly;
+        }
+    }
 }
 
 
@@ -2695,6 +2875,9 @@ void Widget::loadSettings()
 
     if (settings.contains("spinbox_value"))
         ui->spinBox->setValue(settings.value("spinbox_value").toInt());
+        
+    if (settings.contains("lineEdit_14_value"))
+        ui->lineEdit_14->setText(settings.value("lineEdit_14_value").toString());
 
     if (settings.contains("lineEdit_6_value"))
         ui->lineEdit_6->setText(settings.value("lineEdit_6_value").toString());
@@ -2790,6 +2973,7 @@ void Widget::saveSettings()
     QSettings settings("YourCompany", "YourApplication");
 
     settings.setValue("spinbox_value", ui->spinBox->text());
+    settings.setValue("lineEdit_14_value", ui->lineEdit_14->text()); // 固化全局相机增益
     settings.setValue("lineEdit_6_value", ui->lineEdit_6->text());
     settings.setValue("lineEdit_7_value", ui->lineEdit_7->text());
     settings.setValue("lineEdit_8_value", ui->lineEdit_8->text());
@@ -2831,6 +3015,7 @@ void Widget::setupDefaultValues()
     ui->lineEdit_yuzhi->setText("70");
     ui->dateEdit->setPlainText("");
     ui->spinBox->setValue(800);
+    ui->lineEdit_14->setText("1.0"); // 默认增益
     ui->comboBox->setCurrentText("不保存图像");
     ui->comboBox_4->setCurrentText("字库匹配");
     ui->comboBox_2->setCurrentText("无旋转");
@@ -2838,15 +3023,28 @@ void Widget::setupDefaultValues()
     ui->checkBox->setChecked(true);
 }
 
+// ================= 拦截滚轮误操作事件 =================
+bool Widget::eventFilter(QObject *watched, QEvent *event)
+{
+    if (event->type() == QEvent::Wheel) {
+        // 利用类的继承关系，全局拦截所有 QComboBox 和 QAbstractSpinBox(如QSpinBox, QDoubleSpinBox)
+        if (watched->inherits("QComboBox") || watched->inherits("QAbstractSpinBox")) {
+            return true; // 返回 true 表示事件已处理（被丢弃），彻底禁止滚轮
+        }
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
 //关闭相机按钮
 void Widget::on_CloseCamera_clicked()
 {
-    if (myThread->isRunning())
+    // 如果系统正在采集中（软触发或硬触发线程在跑），拦截关闭并提示
+    if ((myThread && myThread->isRunning()) || (cameraThread && cameraThread->isRunning()) || isCollecting)
     {
-        myThread->requestInterruption();
-        myThread->wait();
-        myThread->stop();
+        QMessageBox::warning(this, "警告", "相机正在检测采图中！\n请先点击【停止识别】完全停止检测后，再关闭相机。");
+        return;
     }
+
     if (m_pcMyCamera)
     {
         m_pcMyCamera->Close();
@@ -2897,7 +3095,9 @@ void Widget::on_plcbtn_clicked()
     {
         // 外部触发/硬触发模式逻辑
         int exposureValue = ui->spinBox->value();
+        float gainValue = ui->lineEdit_14->text().toFloat();
         m_pcMyCamera->SetFloatValue("ExposureTime", exposureValue);
+        m_pcMyCamera->SetFloatValue("Gain", gainValue);
 
         if (isCollecting) {
             QMessageBox::information(this, "提示", "已在采集中，若要停止请点击【取消识别】按钮");
@@ -2921,9 +3121,13 @@ void Widget::on_plcbtn_clicked()
                 m_pcMyCamera->SetEnumValue("TriggerMode", 1);
                 m_pcMyCamera->SetEnumValue("TriggerSource", 0); // 硬触发
                 m_pcMyCamera->SetFloatValue("ExposureTime", exposureValue);
+                m_pcMyCamera->SetFloatValue("Gain", gainValue); // 恢复写入增益
                 m_pcMyCamera->SetFloatValue("TriggerDelay", 0);
                 m_pcMyCamera->RegisterImageCallBack();
                 m_pcMyCamera->StartGrabbing();
+
+                m_pcMyCamera->SetEnumValue("LineDebouncerTime", 5000.0); // 硬触发
+
                 QThread::msleep(100);
             } catch (...) {
                 QMessageBox::critical(this, "错误", "相机初始化失败！");
@@ -2944,7 +3148,7 @@ void Widget::on_plcbtn_clicked()
         cameraThread = new CameraThread(this, m_pcMyCamera);
 
         // 🔥 核心修改：将双框坐标和静态模板喂给线程
-        cameraThread->setPresetBoxes(savedDetectionBox, savedTrackingBox);
+        cameraThread->setPresetBoxes(savedDatePoly, savedTrackingBox);
         cameraThread->setPreloadedTemplate(m_loadedTrackingTemplate);
 
         // 连接所有功能信号
@@ -2955,11 +3159,11 @@ void Widget::on_plcbtn_clicked()
             this->slot_displayAndDetect(&img);
         }, Qt::QueuedConnection);
         connect(cameraThread, &CameraThread::signal_boxesSelected, this, &Widget::slot_saveBoxesFromThread, Qt::QueuedConnection);
-        connect(cameraThread, &CameraThread::signal_sendForDetection, this, [this](cv::Mat img, Rect2d rect) {
+        connect(cameraThread, &CameraThread::signal_sendForDetection, this, [this](cv::Mat img, DetectionPose pose) {
             if (!img.empty()) {
-                if (ui->comboBox_4->currentIndex() == 2) this->slot_readAndDetect(&img, rect);
-                else if (ui->comboBox_4->currentIndex() == 0) this->slot_readAndDetect3(&img, rect);
-                else if (ui->comboBox_4->currentIndex() == 1) this->slot_readAndDetect4(&img, rect);
+                if (ui->comboBox_4->currentIndex() == 2) this->slot_readAndDetect(&img, pose);
+                else if (ui->comboBox_4->currentIndex() == 0) this->slot_readAndDetect3(&img, pose);
+                else if (ui->comboBox_4->currentIndex() == 1) this->slot_readAndDetect4(&img, pose);
             }
         }, Qt::QueuedConnection);
 
@@ -2989,13 +3193,15 @@ void Widget::on_plcbtn_clicked()
     {
         // 软触发/连续模式逻辑
         int exposureValue = ui->spinBox->value();
+        float gainValue = ui->lineEdit_14->text().toFloat();
         m_pcMyCamera->SetFloatValue("ExposureTime", exposureValue);
+        m_pcMyCamera->SetFloatValue("Gain", gainValue); // 软触发切入时也保持增益同步
 
         ensureThreadsReady();
         if (!myThread) reinitializeMyThread();
 
         // 🔥 核心修改：将双框坐标和静态模板喂给线程
-        myThread->setPresetBoxes(savedDetectionBox, savedTrackingBox);
+        myThread->setPresetBoxes(savedDatePoly, savedTrackingBox);
         myThread->setPreloadedTemplate(m_loadedTrackingTemplate);
 
         connect(myThread, &MyThread::signal_boxesSelected, this, &Widget::slot_saveBoxesFromThread, Qt::QueuedConnection);
@@ -3007,6 +3213,7 @@ void Widget::on_plcbtn_clicked()
         emit sendDataTo(ui->lineEdit_4->text());
 
         m_pcMyCamera->SetEnumValue("TriggerSource", 7); // 软触发
+        m_pcMyCamera->SetFloatValue("Gain", gainValue); // 软触发重新设置增益
         myThread->getCameraPtr(m_pcMyCamera);
         myThread->getImagePtr(myImage);
 
@@ -3208,13 +3415,13 @@ void Widget::reinitializeMyThread()
             this, &Widget::slot_saveBoxesFromThread, Qt::QueuedConnection);
 
     // 连接信号槽 - 图像检测（根据检测模式）
-    QObject::connect(myThread, &MyThread::signal_sendForDetection, this, [this](cv::Mat img, Rect2d rect) {
+    QObject::connect(myThread, &MyThread::signal_sendForDetection, this, [this](cv::Mat img, DetectionPose pose) {
         if (ui->comboBox_4->currentIndex() == 2) {
-            this->slot_readAndDetect(&img, rect);
+            this->slot_readAndDetect(&img, pose);
         } else if(ui->comboBox_4->currentIndex() == 0) {
-            this->slot_readAndDetect3(&img, rect);
+            this->slot_readAndDetect3(&img, pose);
         } else if(ui->comboBox_4->currentIndex() == 1){
-            this->slot_readAndDetect4(&img, rect);
+            this->slot_readAndDetect4(&img, pose);
         }
     });
 
@@ -3295,15 +3502,18 @@ void Widget::reinitializeCameraThread()
         this->slot_displayAndDetect(&img);
     }, Qt::QueuedConnection);
 
+    connect(cameraThread, &CameraThread::signal_boxesSelected,
+            this, &Widget::slot_saveBoxesFromThread, Qt::QueuedConnection);
+
     // 步骤7: 连接信号槽 - 图像检测（根据检测模式）
-    connect(cameraThread, &CameraThread::signal_sendForDetection, this, [this](cv::Mat img, Rect2d rect) {
+    connect(cameraThread, &CameraThread::signal_sendForDetection, this, [this](cv::Mat img, DetectionPose pose) {
         if (!img.empty()) {
             if (ui->comboBox_4->currentIndex() == 2) {
-                this->slot_readAndDetect(&img, rect);
+                this->slot_readAndDetect(&img, pose);
             } else if (ui->comboBox_4->currentIndex() == 0) {
-                this->slot_readAndDetect3(&img, rect);
+                this->slot_readAndDetect3(&img, pose);
             } else if (ui->comboBox_4->currentIndex() == 1) {
-                this->slot_readAndDetect4(&img, rect);
+                this->slot_readAndDetect4(&img, pose);
             }
         }
     }, Qt::QueuedConnection);
@@ -3352,6 +3562,7 @@ void Widget::loadLastTemplateConfig()
     if (currentTemplateDirPath.isEmpty()) {
         return; // 无历史路径，直接返回
     }
+    qDebug() << "9.1 loadLastTemplateConfig: currentTemplateDirPath 不为空";
 
     QString newMubiaozifu = ui->dateEdit->toPlainText();
     if (newMubiaozifu.isEmpty()) {
@@ -3359,25 +3570,30 @@ void Widget::loadLastTemplateConfig()
         digitTemplates.clear();
         return;
     }
+    qDebug() << "9.2 loadLastTemplateConfig: newMubiaozifu 不为空";
 
     // ================== 修复 1：升级正则表达式，加入中文支持 ==================
     QStringList baseNamesToFind;
-    // 匹配：带括号数字、纯数字、英文字母、中文字符 [\x{4e00}-\x{9fa5}]
-    // 升级正则表达式：允许 [数字、字母、中文] 后面跟带括号的数字作为一个整体
-    QRegularExpression regex(R"(([\d[A-Za-z\x{4e00}-\x{9fa5}]\(\d+\))|(\d)|([A-Za-z])|([\x{4e00}-\x{9fa5}]))");
-    QRegularExpressionMatchIterator matchIt = regex.globalMatch(newMubiaozifu);
+    try {
+        QRegularExpression regex(R"(([\d[A-Za-z\x{4e00}-\x{9fa5}]\(\d+\))|(\d)|([A-Za-z])|([\x{4e00}-\x{9fa5}]))");
+        QRegularExpressionMatchIterator matchIt = regex.globalMatch(newMubiaozifu);
 
-    while (matchIt.hasNext()) {
-        QRegularExpressionMatch match = matchIt.next();
-        QString unit;
-        if (!match.captured(1).isEmpty()) unit = match.captured(1);
-        else if (!match.captured(2).isEmpty()) unit = match.captured(2);
-        else if (!match.captured(3).isEmpty()) unit = match.captured(3);
-        else if (!match.captured(4).isEmpty()) unit = match.captured(4); // 提取到中文字符
+        while (matchIt.hasNext()) {
+            QRegularExpressionMatch match = matchIt.next();
+            QString unit;
+            if (!match.captured(1).isEmpty()) unit = match.captured(1);
+            else if (!match.captured(2).isEmpty()) unit = match.captured(2);
+            else if (!match.captured(3).isEmpty()) unit = match.captured(3);
+            else if (!match.captured(4).isEmpty()) unit = match.captured(4); // 提取到中文字符
 
-        // 统一转为小写以实现不区分大小写的匹配（对中文无影响）
-        baseNamesToFind.append(unit.toLower());
+            // 统一转为小写以实现不区分大小写的匹配（对中文无影响）
+            baseNamesToFind.append(unit.toLower());
+        }
+    } catch (...) {
+        qDebug() << "9.X 正则表达式执行异常崩溃！";
+        return;
     }
+    qDebug() << "9.3 loadLastTemplateConfig: 正则表达式匹配完成";
 
     // ================== 修复 2：无视后缀名，建立基础名映射 ==================
     QDir directory(currentTemplateDirPath);
@@ -3395,6 +3611,7 @@ void Widget::loadLastTemplateConfig()
             filePathMap.insert(baseName, fileInfo.absoluteFilePath());
         }
     }
+    qDebug() << "9.4 loadLastTemplateConfig: 文件列表读取完成";
 
     // ================== 修复 3：使用内存流解码解决中文路径 BUG ==================
     std::vector<cv::Mat> tempTemplates;
@@ -3406,13 +3623,17 @@ void Widget::loadLastTemplateConfig()
             QFile file(filePathMap[searchKey]);
             if (file.open(QIODevice::ReadOnly)) {
                 QByteArray data = file.readAll();
-                std::vector<uchar> buf(data.begin(), data.end());
-                cv::Mat templateImg = cv::imdecode(buf, cv::IMREAD_GRAYSCALE);
+                try {
+                    std::vector<uchar> buf(data.begin(), data.end());
+                    cv::Mat templateImg = cv::imdecode(buf, cv::IMREAD_GRAYSCALE);
 
-                if (templateImg.empty()) {
-                    hasMissing = true; // 图像损坏解码失败
-                } else {
-                    tempTemplates.push_back(templateImg);
+                    if (templateImg.empty()) {
+                        hasMissing = true; // 图像损坏解码失败
+                    } else {
+                        tempTemplates.push_back(templateImg);
+                    }
+                } catch (...) {
+                    qDebug() << "9.X OpenCV imdecode 异常崩溃！";
                 }
             } else {
                 hasMissing = true; // 文件无法打开
@@ -3421,6 +3642,7 @@ void Widget::loadLastTemplateConfig()
             hasMissing = true; // 文件夹里压根没这张图
         }
     }
+    qDebug() << "9.5 loadLastTemplateConfig: 模板图片读取完成";
 
     // ================== 修复 4：防死锁隔离保护 ==================
     if (hasMissing) {
@@ -3431,25 +3653,28 @@ void Widget::loadLastTemplateConfig()
         qDebug() << "[INFO] 模板加载成功，数量: " << digitTemplates.size();
     }
 
-    initOverlapDetectorFromCurrentDir();
-
+    try {
+        initOverlapDetectorFromCurrentDir();
+    } catch (...) {
+        qDebug() << "9.X initOverlapDetectorFromCurrentDir 内部崩溃！";
+    }
+    qDebug() << "9.6 loadLastTemplateConfig: 防重叠模型加载完成";
 }
 
 
 /**
  * @brief 接收线程发射的框坐标信号并保存
  */
-void Widget::slot_saveBoxesFromThread(cv::Rect2d detectionBox, cv::Rect2d trackingBox)
+void Widget::slot_saveBoxesFromThread(DetectionPose pose)
 {
-    savedDetectionBox = detectionBox;
-    savedTrackingBox = trackingBox;
-    hasValidBoxes = true;
+
+
+    g_lastPose = pose;
 
     qDebug() << "box saved:";
-    qDebug() << "  detection box:" << detectionBox.x << detectionBox.y
-             << detectionBox.width << detectionBox.height;
-    qDebug() << "  track box:" << trackingBox.x << trackingBox.y
-             << trackingBox.width << trackingBox.height;
+    qDebug() << "  detection poly size:" << pose.datePoly.size();
+    qDebug() << "  tracking poly size:" << pose.trackingPoly.size();
+    qDebug() << "  angle:" << pose.angleDeg << "score:" << pose.score;
 }
 
 //加载UI样式表模板
@@ -3514,7 +3739,7 @@ void Widget::on_pushButton_11_clicked()
 
     // 3. 复用保存参数逻辑
     // 此时不会去读取 ImageLabel 上可能新画的框，
-    // 内存中的 savedDetectionBox 和 savedTrackingBox 依然是原模板的坐标。
+    // 内存中的 savedTrackingBox 依然是原模板的坐标。
     // 因此调用此函数会用最新的 UI 参数覆盖 app_settings.appset，但完美保留原始框坐标。
     saveSettingsToDir(currentTemplateDirPath);
 
@@ -3525,6 +3750,85 @@ void Widget::on_pushButton_11_clicked()
     // 以防止仅仅修改了字库却因为没有重新加载导致无法生效
     loadLastTemplateConfig();
 
-    QMessageBox::information(this, "成功", QString("已成功更新当前模板的参数配置！\n(模板：%1)\n注：原始追踪框与识别框坐标保持不变。")
-                                           .arg(dir.dirName()));
+    QMessageBox::information(this, "成功", QString::fromLocal8Bit("已成功更新当前模板的参数配置！\n(模板：%1)\n注：原始追踪框与识别框坐标保持不变。").arg(dir.dirName()));
+}
+
+
+//设置相机增益
+void Widget::on_pushButton_12_clicked()
+{
+    if (m_pcMyCamera == nullptr || m_bOpenDevice == false) {
+        QMessageBox::warning(this, "提示", "相机未初始化或未打开，无法设置增益！");
+        return;
+    }
+
+    // 首先获取当前相机允许的增益范围
+    MVCC_FLOATVALUE stParam = {0};
+    int nRet = m_pcMyCamera->GetFloatValue("Gain", &stParam);
+    if (nRet != MV_OK) {
+        QMessageBox::warning(this, "提示", QString::fromLocal8Bit("无法获取相机增益支持的范围！错误码：%1").arg(nRet));
+        return;
+    }
+
+    // 获取lineEdit_14中设置的增益值
+    QString gainStr = ui->lineEdit_14->text();
+    bool isOk = false;
+    float gainValue = gainStr.toFloat(&isOk);
+
+    if (!isOk) {
+        QMessageBox::warning(this, "提示", QString::fromLocal8Bit("请输入有效的增益数字！\n当前相机允许范围：%1 ~ %2").arg(stParam.fMin).arg(stParam.fMax));
+        return;
+    }
+
+    // 检查输入值是否在支持的范围内
+    if (gainValue < stParam.fMin || gainValue > stParam.fMax) {
+        QMessageBox::warning(this, "提示", QString::fromLocal8Bit("输入的增益值超出限制！\n当前相机允许范围：%1 ~ %2").arg(stParam.fMin).arg(stParam.fMax));
+        // 可以选择自动规整到最大或最小值
+        // gainValue = qBound(stParam.fMin, gainValue, stParam.fMax);
+        // ui->lineEdit_14->setText(QString::number(gainValue));
+        return;
+    }
+
+    // 调用SDK接口设置增益
+    nRet = m_pcMyCamera->SetFloatValue("Gain", gainValue);
+    if (nRet == MV_OK) {
+        qDebug() << "SetGain success:" << gainValue;
+        QMessageBox::information(this, "提示", "相机增益设置成功！");
+    } else {
+        qDebug() << "SetGain failed! Ret:" << nRet;
+        QMessageBox::warning(this, "提示", QString::fromLocal8Bit("相机增益设置失败！错误码：%1").arg(nRet));
+    }
+}
+
+
+void Widget::on_WriteVDpushButton_clicked()
+{
+
+    if (!client->Connected())
+    {
+        return;
+    }
+
+    uint32_t value = ui->lineEdit_6->text().toUInt();
+    byte v_data[4] = {0};
+
+    // 大小端转换
+    v_data[3] = (unsigned char)(0xFF & value);
+    v_data[2] = (unsigned char)((0xFF00 & value) >> 8);
+    v_data[1] = (unsigned char)((0xFF0000 & value) >> 16);
+    v_data[0] = (unsigned char)((0xFF000000 & value) >> 24);
+
+    // 写入DB1.924
+    int tmp = client->WriteArea(S7AreaDB, 1, 924, 4, S7WLDWord, v_data);
+// 判断写入结果
+    if (tmp != 0)
+    {
+        // 写入失败
+        QMessageBox::warning(this, "error", "设置错误，请重新设置");
+    }
+    else
+    {
+        // 写入成功
+        QMessageBox::information(this, "提示", "拍照距离设置成功");
+    }
 }

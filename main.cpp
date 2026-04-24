@@ -143,8 +143,6 @@ int main(int argc, char *argv[])
         cv::destroyAllWindows();  // 关闭所有OpenCV窗口
         QThread::msleep(100);     // 给一点时间清理
     });
-    Widget w;
-
     // ------------------------- 插入有效期检查 -------------------------
     if (!checkExpiration()) {
         return -1; // 过期则直接退出
@@ -161,6 +159,8 @@ int main(int argc, char *argv[])
 
     // 创建共享内存，长度为1字节，用于标记程序的运行状态
     shared.create(1);
+
+    Widget w;
 #ifdef Q_OS_WIN
     SetUnhandledExceptionFilter(callback);
 #endif

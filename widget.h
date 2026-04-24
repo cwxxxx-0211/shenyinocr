@@ -69,6 +69,7 @@
 #include <queue>
 #include <templatematch.h>
 #include <Detector.h>
+#include "TrackingTypes.h"
 
 using namespace cv;
 using namespace PaddleOCR;
@@ -143,9 +144,9 @@ private slots:
     void slot_displayAndDetect(cv::Mat *image);  ///< 显示和检测槽
 
     // ========== 检测相关槽函数 ==========
-    void slot_readAndDetect(cv::Mat *image, Rect2d bbox);   ///< 读取并检测（主检测框）
-    void slot_readAndDetect3(cv::Mat *image, Rect2d bbox);  ///< 读取并检测3（模板匹配）
-    void slot_readAndDetect4(cv::Mat *image, Rect2d diffbox); ///< 读取并检测4（字库匹配）
+    void slot_readAndDetect(cv::Mat *image, DetectionPose pose);   ///< 读取并检测（主检测框）
+    void slot_readAndDetect3(cv::Mat *image, DetectionPose pose);  ///< 读取并检测3（模板匹配）
+    void slot_readAndDetect4(cv::Mat *image, DetectionPose pose); ///< 读取并检测4（字库匹配）
 
     // ❌ 已移除：void slot_readAndDetect2() - 额外检测框处理函数（简化版不支持）
 
@@ -167,8 +168,6 @@ private slots:
     void on_ConnectpushButton_clicked(); ///< 连接PLC按钮
     void on_DisconnectpushButton_clicked(); ///< 断开PLC按钮
     void on_WriteVDpushButton_clicked(); ///< 写入VD按钮
-    void on_WriteVDpushButton_2_clicked(); ///< 写入VD按钮2
-    void on_WriteVDpushButton_3_clicked(); ///< 写入VD按钮3
     void rightremove();                 ///< 合格移除
     void wrongremove();                 ///< 不合格移除
 
@@ -177,10 +176,9 @@ private slots:
     QImage cvMatToQImage(const cv::Mat& mat); ///< Mat转QImage
     Mat* QImageToMat(const QImage &image);    ///< QImage转Mat
     void on_cancel_clicked();           ///< 取消按钮
-    void on_delayButton_clicked();      ///< 延时按钮
     void slot_clearResultLabel();       ///< 清除结果标签
     void closeEvent(QCloseEvent *event) override; ///< 关闭事件
-    void slot_saveBoxesFromThread(cv::Rect2d detectionBox, cv::Rect2d trackingBox); ///接收框
+    void slot_saveBoxesFromThread(DetectionPose pose); ///接收运行时姿态
 
     // ========== 字符处理函数 ==========
     bool isChineseChar(unsigned char c);         ///< 判断是否为中文字符
@@ -209,6 +207,11 @@ private slots:
 
 
     void on_pushButton_11_clicked();
+
+    void on_pushButton_12_clicked();
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     cv::Mat m_loadedTrackingTemplate;
@@ -295,8 +298,8 @@ private:
     QRect selectionRect;                ///< 选择矩形
     QRect selectionRect1;               ///< 选择矩形1
     // 保存的框坐标
-    cv::Rect2d savedDetectionBox;   // 保存的检测框
     cv::Rect2d savedTrackingBox;    // 保存的跟踪框
+    std::vector<cv::Point2f> savedDatePoly; // 保存的生产日期相对多边形
     bool hasValidBoxes;              // 是否有有效的框坐标
 
 

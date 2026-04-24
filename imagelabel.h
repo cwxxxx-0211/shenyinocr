@@ -1,4 +1,4 @@
-﻿#ifndef IMAGELABEL_H
+#ifndef IMAGELABEL_H
 #define IMAGELABEL_H
 
 #include <QLabel>
@@ -39,7 +39,7 @@ public:
     void setPixmap(const QPixmap &pixmap);
 
     // ================= 🔥 新增：双框追踪专用接口 =================
-    QRect getDetectionRect() const { return m_detectionRect; }
+    QPolygon getDetectionPoly() const { return m_detectionPoly; }
     QRect getTrackingRect() const { return m_trackingRect; }
     void resetDrawingStep();
 
@@ -80,13 +80,14 @@ private:
 
     // ================= 🔥 新增左键画框状态机 =================
     enum DrawStep {
-        STEP_TRACKING,   // 第一步：正在画锚点框
-        STEP_DETECTION,  // 第二步：正在画识别框
-        STEP_DONE        // 第三步：画完了
+        STEP_TRACKING,        // tracking box 
+        STEP_DETECTION_POLY,  // detection poly 
+        STEP_DONE             // done 
     };
     DrawStep m_currentStep = STEP_TRACKING;
 
-    QRect m_detectionRect;
+    QPolygon m_detectionPoly;
+    QPoint m_tempPolyPoint;
     QRect m_trackingRect;
     bool m_isInteracting = false;
     QPoint m_startPoint;

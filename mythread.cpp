@@ -10,7 +10,6 @@ MyThread::MyThread(QObject *parent)
 {
 
     lastDetectionTime = std::chrono::steady_clock::now();
-    presetDetectionBox = cv::Rect2d(0, 0, 0, 0);
     presetTrackingBox = cv::Rect2d(0, 0, 0, 0);
     usePresetBoxes = false;
 }
@@ -27,8 +26,8 @@ MyThread::~MyThread() {
 void MyThread::stop() { m_stopRequested.store(true); m_tracking.store(false); }
 void MyThread::requestStop() { m_stopRequested.store(true); m_tracking.store(false); }
 
-void MyThread::setPresetBoxes(const cv::Rect2d& detBox, const cv::Rect2d& trackBox) {
-    presetDetectionBox = detBox;
+void MyThread::setPresetBoxes(const std::vector<cv::Point2f>& datePoly, const cv::Rect2d& trackBox) {
+    presetDatePoly = datePoly;
     presetTrackingBox = trackBox;
     usePresetBoxes = true;
 }
@@ -44,19 +43,12 @@ void MyThread::run() {
     if (!cameraPtr || !imagePtr) return;
     m_stopRequested.store(false);
 
-    // 🔥 修复点 1：优先检查是否有加载好的模板，不再盲目设为 false
-    if (!m_trackingTemplate.empty()) {
-        m_tracking.store(true);
-    } else {
-        m_tracking.store(false);
-    }
+    m_tracking.store(!m_trackingTemplate.empty() && m_poseMatcher.isReady());
 
-    cv::Rect2d detectionBox = presetDetectionBox;
-    cv::Rect2d initialDetectionBox = presetDetectionBox;
-    cv::Rect2d trackingBox = presetTrackingBox;
+    std::vector<cv::Point2f> initialDatePoly = presetDatePoly;
     cv::Rect2d initialTrackingBox = presetTrackingBox;
 
-    bool needInitTracker = (usePresetBoxes && presetDetectionBox.width > 0 && m_trackingTemplate.empty());
+    bool needInitTracker = (usePresetBoxes && !presetDatePoly.empty() && m_trackingTemplate.empty());
     lastDetectionTime = std::chrono::steady_clock::now(); //
 
     while (cameraPtr && !m_stopRequested.load()) {
@@ -78,65 +70,43 @@ void MyThread::run() {
                 else if (colorc1 == 3) *imagePtr = channels[0];
             }
 
-            // 初始化基准模板
             if (needInitTracker && !m_tracking.load()) {
                 cv::Rect imageRect(0, 0, imagePtr->cols, imagePtr->rows);
-                cv::Rect trackBoxInt(trackingBox.x, trackingBox.y, trackingBox.width, trackingBox.height);
+                cv::Rect trackBoxInt(initialTrackingBox.x, initialTrackingBox.y,
+                                     initialTrackingBox.width, initialTrackingBox.height);
                 if ((trackBoxInt & imageRect) == trackBoxInt) {
                     m_trackingTemplate = (*imagePtr)(trackBoxInt).clone();
-                    m_tracking.store(true);
+                    m_tracking.store(m_poseMatcher.init(m_trackingTemplate));
                     needInitTracker = false;
-                    emit signal_boxesSelected(detectionBox, trackingBox); //
+                    if (m_tracking.load()) {
+                        const cv::Point2f center(initialTrackingBox.x + initialTrackingBox.width / 2.0f,
+                                                 initialTrackingBox.y + initialTrackingBox.height / 2.0f);
+                        emit signal_boxesSelected(buildDetectionPose(center,
+                                                                     cv::Size2f(m_trackingTemplate.cols, m_trackingTemplate.rows),
+                                                                     initialDatePoly,
+                                                                     0.0f,
+                                                                     1.0f));
+                    }
                 } else { needInitTracker = false; }
             }
 
             cv::Mat displayImage = imagePtr->clone();
 
-            // ================== 静态模板匹配追踪 ==================
-            if (m_tracking.load() && !m_trackingTemplate.empty()) {
-                // 🔥 修复点 2：加大搜索区域至 200 像素，防止位移过快丢失
-                int margin = 200;
-                cv::Rect searchRoi(
-                    initialTrackingBox.x - margin,
-                    initialTrackingBox.y - margin,
-                    initialTrackingBox.width + margin * 2,
-                    initialTrackingBox.height + margin * 2
-                );
-                searchRoi &= cv::Rect(0, 0, imagePtr->cols, imagePtr->rows);
-
-                if (searchRoi.width >= m_trackingTemplate.cols && searchRoi.height >= m_trackingTemplate.rows) {
-                    cv::Mat matchResult;
-                    cv::matchTemplate((*imagePtr)(searchRoi), m_trackingTemplate, matchResult, cv::TM_CCOEFF_NORMED); //
-
-                    double maxVal; cv::Point maxLoc;
-                    cv::minMaxLoc(matchResult, nullptr, &maxVal, nullptr, &maxLoc);
-
-                    // 🔥 修复点 3：降低匹配阈值至 0.45
-                    if (maxVal > 0.45) {
-                        cv::Rect2d curTrackingBox(searchRoi.x + maxLoc.x, searchRoi.y + maxLoc.y,
-                                                 initialTrackingBox.width, initialTrackingBox.height);
-
-                        cv::Point2d diff(curTrackingBox.x - initialTrackingBox.x, curTrackingBox.y - initialTrackingBox.y);
-                        detectionBox.x = initialDetectionBox.x + diff.x;
-                        detectionBox.y = initialDetectionBox.y + diff.y;
-
-                        // 节拍检测逻辑
-                        auto now = std::chrono::steady_clock::now();
-                        int interval = receivedata.toInt();
-                        if (interval <= 0) interval = 300;
-                        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastDetectionTime).count() >= interval) {
-                            emit signal_cleanlabel(); //
-                            emit signal_sendForDetection(imagePtr->clone(), detectionBox); //
-                            lastDetectionTime = now;
-                        }
-                        cv::rectangle(displayImage, curTrackingBox, cv::Scalar(0, 255, 0), 4, 1);
-                    } else {
-                        // 匹配失败警告
-                        cv::rectangle(displayImage, initialTrackingBox, cv::Scalar(0, 0, 255), 4, 1);
+            if (m_tracking.load() && m_poseMatcher.isReady()) {
+                DetectionPose pose = m_poseMatcher.match(*imagePtr, initialDatePoly);
+                 emit signal_boxesSelected(pose);
+                 if (pose.valid) {
+                    auto now = std::chrono::steady_clock::now();
+                    int interval = receivedata.toInt();
+                    if (interval <= 0) interval = 300;
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastDetectionTime).count() >= interval) {
+                        emit signal_cleanlabel(); //
+                        emit signal_sendForDetection(imagePtr->clone(), pose); //
+                        lastDetectionTime = now;
                     }
+                } else if (initialTrackingBox.width > 0 && initialTrackingBox.height > 0) {
+                    cv::rectangle(displayImage, initialTrackingBox, cv::Scalar(0, 0, 255), 4, 1);
                 }
-            } else if (usePresetBoxes) {
-                cv::rectangle(displayImage, detectionBox, cv::Scalar(0, 255, 0), 4, 1);
             }
 
             emit signal_messImage(displayImage); //
@@ -146,10 +116,10 @@ void MyThread::run() {
     }
 }
 
-void MyThread::startTracking() { m_tracking.store(true); lastDetectionTime = std::chrono::steady_clock::now(); }
+void MyThread::startTracking() { m_tracking.store(m_poseMatcher.isReady()); lastDetectionTime = std::chrono::steady_clock::now(); }
 void MyThread::stopTracking() {
     m_tracking.store(false);
-    // 彻底清空内存中的静态模板，防止影响下一次启动
+    m_poseMatcher.clear();
     if (!m_trackingTemplate.empty()) {
         m_trackingTemplate.release();
     }

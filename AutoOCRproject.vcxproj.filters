@@ -60,6 +60,9 @@
     <ClCompile Include="CameraThread.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Detector.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="ImageManipulator.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -108,6 +111,9 @@
     <ClCompile Include="templatematch.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="TrackingPoseMatcher.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="PaddleOCR\src\utility.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -120,6 +126,15 @@
       <Filter>Header Files</Filter>
     </QtMoc>
     <ClInclude Include="CryptoUtils.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Detector.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="TrackingPoseMatcher.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="TrackingTypes.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Zhuizong.h">

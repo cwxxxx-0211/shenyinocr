@@ -202,6 +202,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="CameraThread.cpp" />
+    <ClCompile Include="Detector.cpp" />
     <ClCompile Include="ImageManipulator.cpp" />
     <ClCompile Include="Zhuizong.cpp" />
     <ClCompile Include="ccrashstack.cpp" />
@@ -218,6 +219,7 @@
     <ClCompile Include="PaddleOCR\src\preprocess_op.cpp" />
     <ClCompile Include="snap7.cpp" />
     <ClCompile Include="templatematch.cpp" />
+    <ClCompile Include="TrackingPoseMatcher.cpp" />
     <ClCompile Include="PaddleOCR\src\utility.cpp" />
     <ClCompile Include="widget.cpp" />
   </ItemGroup>
@@ -225,6 +227,9 @@
     <QtMoc Include="CameraThread.h">
     </QtMoc>
     <ClInclude Include="CryptoUtils.h" />
+    <ClInclude Include="Detector.h" />
+    <ClInclude Include="TrackingPoseMatcher.h" />
+    <ClInclude Include="TrackingTypes.h" />
     <ClInclude Include="Zhuizong.h" />
     <ClInclude Include="ccrashstack.h" />
     <ClInclude Include="PaddleOCR\include\clipper.h" />

@@ -10,6 +10,8 @@
 #include <opencv2/tracking.hpp>
 #include "cmvcamera.h"
 #include "Zhuizong.h"
+#include "TrackingPoseMatcher.h"
+#include "TrackingTypes.h"
 
 using namespace cv;
 using namespace std;
@@ -72,8 +74,8 @@ public:
      */
     bool CheckRisingEdge();
 
-    // 🔥 新增：设置预设框
-    void setPresetBoxes(const cv::Rect2d& detBox, const cv::Rect2d& trackBox);
+    // 🔥 新增：设置预设框和多边形
+    void setPresetBoxes(const std::vector<cv::Point2f>& datePoly, const cv::Rect2d& trackBox);
 
     // 🔥 新增：清除预设框
     void clearPresetBoxes();
@@ -82,7 +84,7 @@ public:
     void setPreloadedTemplate(const cv::Mat& tpl) {
         if (!tpl.empty()) {
             m_trackingTemplate = tpl.clone();
-            m_tracking.store(true); // 拥有模板后，直接跳过首帧抠图，进入追踪模式
+            m_tracking.store(m_poseMatcher.init(m_trackingTemplate));
         }
     }
 
@@ -96,17 +98,16 @@ signals:
     /**
      * @brief 发送检测信号
      * @param image 图像指针
-     * @param rect 检测区域
+     * @param pose 检测姿态
      */
-    void signal_sendForDetection(cv::Mat image, cv::Rect2d rect);
+    void signal_sendForDetection(cv::Mat image, DetectionPose pose);
 
     /**
      * @brief 清除标签信号
      */
     void signal_cleanlabel();
 
-    //发送识别框
-    void signal_boxesSelected(cv::Rect2d detectionBox, cv::Rect2d trackingBox);
+    void signal_boxesSelected(DetectionPose pose);
 
 public slots:
     /**
@@ -139,6 +140,7 @@ private:
     // OpenCV相关
     Zhuizong *zhuizong;                 // 追踪辅助类
     cv::Mat m_trackingTemplate;
+    TrackingPoseMatcher m_poseMatcher;
 
     // 相机相关
     CMvCamera *cameraPtr;               // 相机指针
@@ -157,7 +159,7 @@ private:
     std::chrono::steady_clock::time_point lastDetectionTime;  // 上次检测时间
 
     // 🔥 新增：预设框相关成员
-    cv::Rect2d presetDetectionBox;   // 预设的检测框
+    std::vector<cv::Point2f> presetDatePoly;   // 预设的生产日期多边形相对坐标
     cv::Rect2d presetTrackingBox;    // 预设的跟踪框
     bool usePresetBoxes;              // 是否使用预设框
 };
