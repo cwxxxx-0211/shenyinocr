@@ -3667,14 +3667,42 @@ void Widget::loadLastTemplateConfig()
  */
 void Widget::slot_saveBoxesFromThread(DetectionPose pose)
 {
+    // 1. 如果目标离开了视野，立刻清空屏幕上的字符框和钢印框，保持画面干净
+    if (!pose.valid) {
+        g_lastDrawResults.clear();
+        g_lastStampPoly.clear();
+        g_lastStampIsOverlap = false;
+    }
+    // 2. 如果目标还在视野中，并且内存里有上一轮识别出的字符框
+    else if (g_lastPose.valid && (!g_lastDrawResults.empty() || !g_lastStampPoly.empty())) {
 
+        // 计算两帧之间的物理位移和旋转角度差
+        float angleDiff = pose.angleDeg - g_lastPose.angleDeg;
+        cv::Point2f oldCenter = g_lastPose.anchorCenter;
+        cv::Point2f newCenter = pose.anchorCenter;
 
+        // 让所有字符框跟随产品一起物理移动（AR视觉跟随）
+        for (auto& res : g_lastDrawResults) {
+            for (auto& pt : res.poly) {
+                // 转为相对于旧中心的相对坐标
+                cv::Point2f rel(pt.x - oldCenter.x, pt.y - oldCenter.y);
+                // 叠加这两帧之间的微小旋转
+                cv::Point2f rot = rotateRelativePoint(rel, angleDiff);
+                // 叠加上新中心点，得出全新的绝对坐标
+                pt = cv::Point(cvRound(rot.x + newCenter.x), cvRound(rot.y + newCenter.y));
+            }
+        }
+
+        // 让黄/红色的钢印检测框也跟随产品一起移动
+        for (auto& pt : g_lastStampPoly) {
+            cv::Point2f rel(pt.x - oldCenter.x, pt.y - oldCenter.y);
+            cv::Point2f rot = rotateRelativePoint(rel, angleDiff);
+            pt = cv::Point(cvRound(rot.x + newCenter.x), cvRound(rot.y + newCenter.y));
+        }
+    }
+
+    // 最后更新全局位姿
     g_lastPose = pose;
-
-    qDebug() << "box saved:";
-    qDebug() << "  detection poly size:" << pose.datePoly.size();
-    qDebug() << "  tracking poly size:" << pose.trackingPoly.size();
-    qDebug() << "  angle:" << pose.angleDeg << "score:" << pose.score;
 }
 
 //加载UI样式表模板
