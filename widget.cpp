@@ -399,7 +399,7 @@ Widget::Widget(QWidget *parent)
 
     // 初始化窗口组件
     initWidget();
-    qDebug() << "1. initWidget执行完毕 (PLC尝试连接完成)";
+    qDebug() << "1. initWidget执行完毕 ";
 
     // 加载OCR配置文件
     config = new OCRConfig("config1.txt");
@@ -472,6 +472,27 @@ Widget::Widget(QWidget *parent)
     qDebug() << "8. loadSettings 执行完毕";
 
     loadLastTemplateConfig(); // 加载模板图像
+
+    QTimer::singleShot(1000, this, [this]() {
+        // 1. 先把从界面获取的文本存为一个 QString 变量
+        QString targetIp = ui->lineEdit->text();
+
+        QByteArray ad = targetIp.toUtf8();
+        Address = ad.data();
+
+        int tmp = client->ConnectTo(Address, 0, 1);
+        if (tmp == 0) {
+            QMessageBox::information(this, "提示", "PLC 自动连接成功");
+        } else {
+            // 2. 使用 QString::arg() 动态拼接字符串
+            // %1 会被替换为 targetIp 的真实内容
+            QString errorMsg = QString("PLC 自动连接失败！\n尝试连接的地址：%1\n请检查网络或稍后手动连接！").arg(targetIp);
+
+            QMessageBox::warning(this, "警告", errorMsg);
+        }
+    });
+
+
     qDebug() << "9. loadLastTemplateConfig 执行完毕 (Widget构造结束!)";
 }
 
@@ -482,6 +503,15 @@ Widget::Widget(QWidget *parent)
 Widget::~Widget()
 {
     qDebug() << "Widget destructor called";
+
+    if (client) {
+            if (client->Connected()) {
+                client->Disconnect();
+            }
+            // 如果 client 是在构造函数 new 出来的，记得 delete 防止内存泄漏
+            delete client;
+            client = nullptr;
+        }
 
     // 先关闭所有窗口
     try {
@@ -592,16 +622,6 @@ void Widget::initWidget()
     connect(this, &Widget::ssim, templatematch, &TemplateMatch::ssimvalue);
 
 
-    //开机直接连接PLC
-    QByteArray ad(ui->lineEdit->text().toUtf8());
-    Address = ad.data();
-
-    int tmp = client->ConnectTo(Address, 0, 1);
-
-    if (tmp != 0)
-    {
-        QMessageBox::critical(this, "error", "PLC连接失败");
-    }
 
 
 }
@@ -2563,6 +2583,7 @@ void Widget::saveSettingsToDir(const QString &dirPath)
     // 新增：保存模板路径
     settings.setValue("saveDirPath", selectedDir);
     settings.setValue("TemplateDirPath", currentTemplateDirPath);
+    settings.setValue("lineEdit_value", ui->lineEdit->text()); // 保存IP地址
 
 
     // 🔥 新增：保存框坐标
@@ -2799,6 +2820,10 @@ void Widget::loadSettingsFromDir(const QString &dirPath)
     if (settings.contains("lineEdit_19_value")) ui->lineEdit_19->setText(settings.value("lineEdit_19_value").toString());
     if (settings.contains("lineEdit_yuzhi_value")) ui->lineEdit_yuzhi->setText(settings.value("lineEdit_yuzhi_value").toString());
 
+    if (settings.contains("lineEdit_value")) {
+        ui->lineEdit->setText(settings.value("lineEdit_value").toString());
+    }
+
     if (settings.contains("dateEdit_value")) {
         ui->dateEdit->setPlainText(settings.value("dateEdit_value").toString());
     }
@@ -2915,6 +2940,10 @@ void Widget::loadSettings()
     if (settings.contains("dateEdit_value"))
         ui->dateEdit->setPlainText(settings.value("dateEdit_value").toString());
 
+    if (settings.contains("lineEdit_value")) {
+        ui->lineEdit->setText(settings.value("lineEdit_value").toString());
+    }
+
     if (settings.contains("comboBox_value"))
     {
         QString value = settings.value("comboBox_value").toString();
@@ -2994,6 +3023,7 @@ void Widget::saveSettings()
     // 新增：保存模板路径
     settings.setValue("saveDirPath", selectedDir);
     settings.setValue("TemplateDirPath", currentTemplateDirPath);
+    settings.setValue("lineEdit_value", ui->lineEdit->text()); // 保存IP地址
 }
 
 /**
@@ -3245,6 +3275,20 @@ void Widget::on_HandwareDetect_clicked()
     {
         QMessageBox::warning(this, "警告", "未找到相机设备！");
         return;
+    }
+
+    //连接PLC
+    QByteArray ad(ui->lineEdit->text().toUtf8());
+    Address = ad.data();
+
+    int tmp = client->ConnectTo(Address, 0, 1);
+
+    if (tmp != 0)
+    {
+        QMessageBox::critical(this, "error", "PLC连接失败");
+    }
+    else{
+    qDebug()<<"opencamera，plc connect success";
     }
 
     // 打开设备
@@ -3778,7 +3822,7 @@ void Widget::on_pushButton_11_clicked()
     // 以防止仅仅修改了字库却因为没有重新加载导致无法生效
     loadLastTemplateConfig();
 
-    QMessageBox::information(this, "成功", QString::fromLocal8Bit("已成功更新当前模板的参数配置！\n(模板：%1)\n注：原始追踪框与识别框坐标保持不变。").arg(dir.dirName()));
+    QMessageBox::information(this, "成功", QString("已成功更新当前模板的参数配置！\n(模板：%1)\n注：原始追踪框与识别框坐标保持不变。").arg(dir.dirName()));
 }
 
 
